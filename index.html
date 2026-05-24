@@ -236,8 +236,10 @@
       transition: transform 0.06s, background 0.06s;
     }
     .touch-btn:active { transform: scale(0.92); background: rgba(255, 255, 255, 0.2); }
+    /* Action buttons cluster on the right side (right thumb covers FIRE + LOOK).
+       Both sit above the LOOK joystick so they never overlap the LEFT joystick. */
     #touch-fire {
-      right: 200px; bottom: 60px;
+      right: 36px; bottom: 200px;
       width: 96px; height: 96px;
       font-size: 18px;
       border: 3px solid #ff8050;
@@ -245,9 +247,9 @@
       color: #ffd0a0;
     }
     #touch-missile {
-      right: 290px; bottom: 130px;
-      width: 78px; height: 78px;
-      font-size: 24px;
+      right: 144px; bottom: 218px;
+      width: 72px; height: 72px;
+      font-size: 22px;
       border: 3px solid #ffd060;
       box-shadow: 0 0 14px #ffa040;
       display: none;
@@ -261,6 +263,43 @@
       border: 2px solid #00ff88;
       color: #00ff88;
       box-shadow: 0 0 10px #00ff88;
+    }
+
+    /* On touch devices, push the existing HUD out of the joystick zone (top of screen)
+       so the bottom strip is reserved for thumbs. */
+    @media (pointer: coarse) {
+      #health-bar-container { bottom: auto; top: 12px; left: 12px; }
+      #bones-display, #diamonds-display, #lasers-display, #dirt-display, #nails-display {
+        bottom: auto; top: 12px; right: 64px;
+      }
+      #missiles-display { bottom: auto; top: 40px; right: 64px; }
+      #room-display { top: 40px; }
+      #dog-face { bottom: auto; top: 50px; left: 50%; width: 72px; height: 72px; }
+    }
+
+    /* Small phone (≤700 px in landscape, or narrow portrait): shrink everything. */
+    @media (pointer: coarse) and (max-width: 700px) {
+      .touch-stick { width: 110px; height: 110px; }
+      .touch-stick .stick { width: 52px; height: 52px; margin: -26px 0 0 -26px; }
+      #joystick-left  { left: 16px;  bottom: 20px; }
+      #joystick-right { right: 16px; bottom: 20px; }
+      #touch-fire    { right: 16px;  bottom: 150px; width: 78px;  height: 78px;  font-size: 14px; }
+      #touch-missile { right: 100px; bottom: 160px; width: 60px;  height: 60px;  font-size: 18px; }
+      #touch-dev     { width: 38px; height: 38px; font-size: 18px; top: 8px; right: 8px; }
+      #dog-face      { width: 56px; height: 56px; top: 40px; }
+      #health-bar    { width: 130px; }
+      #room-display  { font-size: 11px; }
+      #bones-display, #diamonds-display, #lasers-display, #dirt-display, #nails-display {
+        font-size: 14px;
+      }
+    }
+
+    /* Portrait phone: even tighter — joysticks/buttons closer to the bottom edge. */
+    @media (pointer: coarse) and (orientation: portrait) {
+      #joystick-left  { bottom: 30px; }
+      #joystick-right { bottom: 30px; }
+      #touch-fire     { bottom: 160px; }
+      #touch-missile  { bottom: 170px; }
     }
   </style>
 </head>
