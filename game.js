@@ -4079,11 +4079,15 @@ function updatePlayer(dt) {
   const touchRunning = TOUCH.active && touchStickMag > 0.85;
   const speed = PLAYER_SPEED * ((KEYS['ShiftLeft'] || KEYS['ShiftRight'] || touchRunning) ? RUN_MULT : 1);
 
-  // Touch right-stick → continuous look rate (feeds the same MOUSE.dx/dy pipeline)
+  // Touch right-stick → continuous look rate (feeds the same MOUSE.dx/dy pipeline).
+  // ~2400 px/s at full deflection ≈ 4.8 rad/s ≈ 275°/s — typical mobile FPS turn speed.
+  // A x*|x|^0.6 curve keeps small deflections precise while full sweeps feel fast.
   if (TOUCH.active) {
-    const TOUCH_LOOK_RATE = 520;   // pixels/sec equivalent at full deflection
-    MOUSE.dx += TOUCH.lookX * TOUCH_LOOK_RATE * dt;
-    MOUSE.dy += TOUCH.lookY * TOUCH_LOOK_RATE * dt;
+    const TOUCH_LOOK_RATE_X = 2400;
+    const TOUCH_LOOK_RATE_Y = 1800;   // pitch a bit gentler than yaw
+    const curve = (v) => Math.sign(v) * Math.pow(Math.abs(v), 1.6);
+    MOUSE.dx += curve(TOUCH.lookX) * TOUCH_LOOK_RATE_X * dt;
+    MOUSE.dy += curve(TOUCH.lookY) * TOUCH_LOOK_RATE_Y * dt;
   }
 
   // Mouse look
