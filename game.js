@@ -113,6 +113,29 @@ const SCRATCH = {
 };
 const MAX_PARTICLES = 80;   // hard cap on scene.userData.particles so explosions can't unbound the heap
 
+// Module-level materials reused across levels — never dispose these on
+// level transitions or every subsequent throwBone/Laser/etc will render broken.
+const PERSISTENT_MATS = new Set();
+function persistMat(m) { PERSISTENT_MATS.add(m); return m; }
+
+// Free GPU resources for everything under the given root (geometries + any
+// materials that aren't on the persistent list). Safe to call before
+// scene.remove(child) on each top-level scene child during a level switch.
+function disposeObjectTree(root) {
+  root.traverse((node) => {
+    if (node.geometry) node.geometry.dispose();
+    if (!node.material) return;
+    const mats = Array.isArray(node.material) ? node.material : [node.material];
+    for (const m of mats) {
+      if (PERSISTENT_MATS.has(m)) continue;
+      for (const key of ['map', 'normalMap', 'emissiveMap', 'alphaMap', 'roughnessMap', 'metalnessMap']) {
+        if (m[key]) m[key].dispose();
+      }
+      m.dispose();
+    }
+  });
+}
+
 // ─── Touch input (iPad / iPhone) ─────────────────────────────────────────────
 // Activated when (pointer: coarse). Coexists with desktop controls — both work.
 const TOUCH = {
@@ -1893,10 +1916,10 @@ function spawnVacuum(x, z) {
 }
 
 // ─── Dirt Clod (Neptune ammo) ───────────────────────────────────────────────
-const dirtMat = new THREE.MeshStandardMaterial({
+const dirtMat = persistMat(new THREE.MeshStandardMaterial({
   color: 0x5a3a20, roughness: 1.0, metalness: 0,
   emissive: 0x1a0a05, emissiveIntensity: 0.2,
-});
+}));
 
 function makeDirtClod(scale = 1) {
   // Lumpy potato shape via slightly deformed icosahedron
@@ -2930,10 +2953,10 @@ function spawnWaterBlob(fromPos, dir) {
 }
 
 // ─── Nailgun (player weapon on Saturn) ───────────────────────────────────────
-const nailMat = new THREE.MeshStandardMaterial({
+const nailMat = persistMat(new THREE.MeshStandardMaterial({
   color: 0xcfd4dc, metalness: 0.85, roughness: 0.25,
   emissive: 0x202028, emissiveIntensity: 0.2,
-});
+}));
 
 function makeNailMesh(forFlight = false) {
   // In-flight nails are noticeably bigger + brighter so the player can see them.
@@ -3162,7 +3185,7 @@ function updateSaturnWind(dt) {
 }
 
 // ─── Laser Projectile (space) ────────────────────────────────────────────────
-const laserMat = new THREE.MeshBasicMaterial({ color: 0x60ffff });
+const laserMat = persistMat(new THREE.MeshBasicMaterial({ color: 0x60ffff }));
 
 function makeLaserMesh(color = 0x60ffff) {
   const beam = new THREE.Mesh(
@@ -3716,7 +3739,7 @@ function throwAmmo() {
 }
 
 // ─── Bone Projectile ─────────────────────────────────────────────────────────
-const boneMat3 = new THREE.MeshStandardMaterial({ color: 0xf0e8cc, roughness: 0.7 });
+const boneMat3 = persistMat(new THREE.MeshStandardMaterial({ color: 0xf0e8cc, roughness: 0.7 }));
 
 function throwBone() {
   if (STATE.bones <= 0 || STATE.gameover) return;
@@ -3770,13 +3793,13 @@ function animateThrow() {
 }
 
 // ─── Diamond Projectile ──────────────────────────────────────────────────────
-const diamondMat = new THREE.MeshStandardMaterial({
+const diamondMat = persistMat(new THREE.MeshStandardMaterial({
   color: 0x7fe9ff,
   emissive: 0x4fb8d8,
   emissiveIntensity: 1.5,
   metalness: 0.6,
   roughness: 0.15,
-});
+}));
 
 function makeDiamondMesh(scale = 1) {
   // Octahedron = diamond shape
@@ -4619,12 +4642,12 @@ function spawnDeathParticles(pos) {
 }
 
 // ─── Bone Pickups ─────────────────────────────────────────────────────────────
-const pickupBoneMat = new THREE.MeshStandardMaterial({
+const pickupBoneMat = persistMat(new THREE.MeshStandardMaterial({
   color: 0xf5e8c0,
   roughness: 0.6,
   emissive: 0xffe090,
   emissiveIntensity: 0.25,
-});
+}));
 
 function spawnBonePickups(count) {
   for (let i = 0; i < count; i++) {
@@ -5380,12 +5403,14 @@ function loadNextRoom() {
   overlay.style.opacity = '1';
 
   setTimeout(() => {
-    // Clear old room: every direct child of scene except camera
+    // Clear old room: every direct child of scene except camera. Deep-dispose
+    // each child's geometries/materials so GPU memory doesn't grow over the
+    // session as the player hops levels.
     const toRemove = [];
     for (const child of scene.children) {
       if (child !== camera) toRemove.push(child);
     }
-    for (const obj of toRemove) scene.remove(obj);
+    for (const obj of toRemove) { disposeObjectTree(obj); scene.remove(obj); }
 
     // Clear pickup arrays + projectile/enemy arrays
     ENEMIES.length = 0;
@@ -6250,6 +6275,12 @@ function showMessage(text, duration = 2000) {
 function gameOver() {
   STATE.gameover = true;
   document.exitPointerLock();
+  // On touch devices, hide the joysticks/FIRE button so they don't intercept
+  // taps meant for the game-over screen and so the "stuck stick" state can't
+  // keep dragging the camera around behind the overlay.
+  const tui = document.getElementById('touch-ui');
+  if (tui && TOUCH.active) tui.style.display = 'none';
+  TOUCH.moveX = 0; TOUCH.moveZ = 0; TOUCH.lookX = 0; TOUCH.lookY = 0;
   const showLevelBtn = currentRoom > 1 || STATE.level !== 'dungeon';
   const btn = document.getElementById('restart-level-btn');
   if (btn) {
@@ -6285,12 +6316,14 @@ function rebuildLevel(fromBeginning) {
   else if (inOcean)                       { STATE.diamonds = 12; STATE.bones = 30; STATE.lasers = 0; STATE.dirt = 0; STATE.nails = 0; }
   else                                    { STATE.bones = 30;  STATE.diamonds = 0; STATE.lasers = 0; STATE.dirt = 0; STATE.nails = 0; }
 
-  // Tear down ALL scene children except camera (camera holds dog view model)
+  // Tear down ALL scene children except camera (camera holds dog view model).
+  // Deep-dispose each subtree's geometries + non-persistent materials so the
+  // GPU isn't carrying state from every previous level.
   const toRemove = [];
   for (const child of scene.children) {
     if (child !== camera) toRemove.push(child);
   }
-  for (const obj of toRemove) scene.remove(obj);
+  for (const obj of toRemove) { disposeObjectTree(obj); scene.remove(obj); }
 
   ENEMIES.length = 0;
   PROJECTILES.length = 0;
@@ -6313,6 +6346,11 @@ function rebuildLevel(fromBeginning) {
 
   document.getElementById('room-num').textContent = levelLabel(STATE.level, currentRoom);
   document.getElementById('restart-screen').style.display = 'none';
+  // Re-show touch UI if the game-over hid it
+  if (TOUCH.active) {
+    const tui = document.getElementById('touch-ui');
+    if (tui) tui.style.display = 'block';
+  }
   document.getElementById('victory-screen').style.display = 'none';
   // rebuildLevel runs from a button click (Try Again / Retry Level / dev menu warp),
   // so we have a user gesture and can safely auto-lock the pointer.
@@ -6621,6 +6659,14 @@ function loop() {
   }
 
   const dt = Math.min(clock.getDelta(), 0.05);
+
+  // After death, freeze the simulation entirely. Without this guard, enemies
+  // kept moving and the touch joystick kept driving the camera around behind
+  // the game-over screen — making the death feel "ignored" on mobile.
+  if (STATE.gameover) {
+    renderer.render(scene, camera);
+    return;
+  }
 
   if (transitioning) {
     // During Pluto crash we still want stars & Pluto to keep moving
