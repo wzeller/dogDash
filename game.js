@@ -4175,8 +4175,8 @@ function updatePlayer(dt) {
     const inFlight = STATE.level === 'space-cockpit'
       || STATE.level === 'neptune-approach'
       || STATE.level === 'saturn-approach';
-    const TOUCH_LOOK_RATE_X = inFlight ?  700 : 2400;
-    const TOUCH_LOOK_RATE_Y = inFlight ?  500 : 1800;
+    const TOUCH_LOOK_RATE_X = inFlight ?  700 : 1600;
+    const TOUCH_LOOK_RATE_Y = inFlight ?  500 : 1200;
     const curve = (v) => Math.sign(v) * Math.pow(Math.abs(v), 1.6);
     MOUSE.dx += curve(tlx) * TOUCH_LOOK_RATE_X * dt;
     MOUSE.dy += curve(tly) * TOUCH_LOOK_RATE_Y * dt;
