@@ -149,29 +149,47 @@ function initTouchControls() {
     TOUCH.lookY = ny;
   });
 
-  // Fire button — tap or hold
-  const fireBtn = document.getElementById('touch-fire');
-  if (fireBtn) {
-    const fire = (e) => {
+  // Auto-fire helper: shoots immediately on press, then on a fixed interval while held
+  function bindAutoFire(btnId, action, intervalMs) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    let timerId = null;
+    let touchId = null;
+    const start = (e) => {
       e.preventDefault(); e.stopPropagation();
       if (!STATE.started || STATE.gameover) return;
-      throwAmmo();
+      if (e.changedTouches && e.changedTouches[0]) touchId = e.changedTouches[0].identifier;
+      action();           // immediate fire on press
+      if (timerId !== null) return;
+      timerId = setInterval(() => {
+        if (!STATE.started || STATE.gameover) { stop(); return; }
+        action();
+      }, intervalMs);
     };
-    fireBtn.addEventListener('touchstart', fire, { passive: false });
-    fireBtn.addEventListener('mousedown', fire);
+    const stop = (e) => {
+      if (e && e.changedTouches && touchId !== null) {
+        let match = false;
+        for (const t of e.changedTouches) {
+          if (t.identifier === touchId) { match = true; break; }
+        }
+        if (!match) return;
+      }
+      if (timerId !== null) { clearInterval(timerId); timerId = null; }
+      touchId = null;
+    };
+    btn.addEventListener('touchstart', start, { passive: false });
+    btn.addEventListener('touchend', stop, { passive: false });
+    btn.addEventListener('touchcancel', stop, { passive: false });
+    btn.addEventListener('mousedown', start);
+    btn.addEventListener('mouseup', stop);
+    btn.addEventListener('mouseleave', stop);
   }
 
-  // Missile button
-  const misBtn = document.getElementById('touch-missile');
-  if (misBtn) {
-    const fireM = (e) => {
-      e.preventDefault(); e.stopPropagation();
-      if (!STATE.started || STATE.gameover) return;
-      throwMissile();
-    };
-    misBtn.addEventListener('touchstart', fireM, { passive: false });
-    misBtn.addEventListener('mousedown', fireM);
-  }
+  // FIRE: 8 shots/sec (matches feel of a manual click-spammer but consistent).
+  // Cockpit laser already paces nicely; surface bones/dirt/nails benefit too.
+  bindAutoFire('touch-fire', () => throwAmmo(), 130);
+  // Missile: 1.5/sec — heavier weapon, don't let people spam.
+  bindAutoFire('touch-missile', () => throwMissile(), 650);
 
   // Dev menu corner button — replaces the ` key on touch
   const devBtn = document.getElementById('touch-dev');
@@ -275,12 +293,13 @@ const PLAYER_HEIGHT = 1.1;
 function init() {
   clock = new THREE.Clock();
 
-  // Renderer
+  // Renderer (cheaper settings on touch devices — DPR=1, no antialias, no shadows)
+  const touchMode = isTouchDevice();
   const canvas = document.getElementById('canvas');
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: !touchMode, powerPreference: 'high-performance' });
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.shadowMap.enabled = true;
+  renderer.setPixelRatio(touchMode ? 1 : Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = !touchMode;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.setClearColor(0x050005);
   renderer.toneMapping = THREE.ReinhardToneMapping;
@@ -807,7 +826,7 @@ function buildSpaceCockpit() {
 
   // ── Star field ──
   const starGeo = new THREE.BufferGeometry();
-  const STAR_COUNT = 1200;
+  const STAR_COUNT = isTouchDevice() ? 500 : 1200;
   const starPos = new Float32Array(STAR_COUNT * 3);
   for (let i = 0; i < STAR_COUNT; i++) {
     starPos[i*3 + 0] = (Math.random() - 0.5) * 80;
@@ -824,7 +843,7 @@ function buildSpaceCockpit() {
   scene.userData.stars = stars;
 
   // Streak lines (longer trailing stars to sell the speed)
-  const streakCount = 220;
+  const streakCount = isTouchDevice() ? 90 : 220;
   const streakGeo = new THREE.BufferGeometry();
   const streakPos = new Float32Array(streakCount * 6); // pairs of points (line segments)
   for (let i = 0; i < streakCount; i++) {
@@ -2297,7 +2316,8 @@ function buildSaturnApproach() {
   // ── Ring debris streaming past the cockpit (chunks of ice/rock) ──
   const debris = [];
   const debrisMat = new THREE.MeshStandardMaterial({ color: 0xc0b090, roughness: 0.7, metalness: 0.15 });
-  for (let i = 0; i < 60; i++) {
+  const debrisCount = isTouchDevice() ? 28 : 60;
+  for (let i = 0; i < debrisCount; i++) {
     const r = 0.15 + Math.random() * 0.45;
     const chunk = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), debrisMat);
     chunk.position.set(
@@ -4080,11 +4100,15 @@ function updatePlayer(dt) {
   const speed = PLAYER_SPEED * ((KEYS['ShiftLeft'] || KEYS['ShiftRight'] || touchRunning) ? RUN_MULT : 1);
 
   // Touch right-stick → continuous look rate (feeds the same MOUSE.dx/dy pipeline).
-  // ~2400 px/s at full deflection ≈ 4.8 rad/s ≈ 275°/s — typical mobile FPS turn speed.
-  // A x*|x|^0.6 curve keeps small deflections precise while full sweeps feel fast.
+  // Cockpit/flight modes use much slower rates — you're aiming at distant ships with
+  // a fixed cockpit frame, so a fast sweep overshoots constantly. Foot levels keep
+  // the snappy ~275°/s rate. A x*|x|^0.6 curve keeps small deflections precise.
   if (TOUCH.active) {
-    const TOUCH_LOOK_RATE_X = 2400;
-    const TOUCH_LOOK_RATE_Y = 1800;   // pitch a bit gentler than yaw
+    const inFlight = STATE.level === 'space-cockpit'
+      || STATE.level === 'neptune-approach'
+      || STATE.level === 'saturn-approach';
+    const TOUCH_LOOK_RATE_X = inFlight ?  700 : 2400;
+    const TOUCH_LOOK_RATE_Y = inFlight ?  500 : 1800;
     const curve = (v) => Math.sign(v) * Math.pow(Math.abs(v), 1.6);
     MOUSE.dx += curve(TOUCH.lookX) * TOUCH_LOOK_RATE_X * dt;
     MOUSE.dy += curve(TOUCH.lookY) * TOUCH_LOOK_RATE_Y * dt;
