@@ -857,7 +857,7 @@ function buildSpaceCockpit() {
 
   // ── Star field ──
   const starGeo = new THREE.BufferGeometry();
-  const STAR_COUNT = isTouchDevice() ? 500 : 1200;
+  const STAR_COUNT = isTouchDevice() ? 400 : 700;
   const starPos = new Float32Array(STAR_COUNT * 3);
   for (let i = 0; i < STAR_COUNT; i++) {
     starPos[i*3 + 0] = (Math.random() - 0.5) * 80;
@@ -874,7 +874,7 @@ function buildSpaceCockpit() {
   scene.userData.stars = stars;
 
   // Streak lines (longer trailing stars to sell the speed)
-  const streakCount = isTouchDevice() ? 90 : 220;
+  const streakCount = isTouchDevice() ? 70 : 130;
   const streakGeo = new THREE.BufferGeometry();
   const streakPos = new Float32Array(streakCount * 6); // pairs of points (line segments)
   for (let i = 0; i < streakCount; i++) {
@@ -4330,13 +4330,23 @@ function updateProjectiles(dt) {
         consumed = true;
         break;
       }
-      // Regular enemies — broad-phase point-in-sphere
+      // Regular enemies — use segment-sphere for fast projectiles (lasers/missiles/
+      // nails travel >50 m/s and can skip past targets at low FPS otherwise).
+      // Bones/diamonds/dirt fall back to the cheaper point-in-sphere check.
       const hitY = enemy.position.y + (enemy.userData.hitOffsetY || 0.4);
-      const dx = p.position.x - enemy.position.x;
-      const dy = p.position.y - hitY;
-      const dz = p.position.z - enemy.position.z;
       const r = enemy.userData.hitRadius || 0.85;
-      if (dx*dx + dy*dy + dz*dz < r * r) {
+      const fast = p.userData.isLaser || p.userData.isMissile || p.userData.isNail;
+      let hit = false;
+      if (fast) {
+        const enemyCenter = SCRATCH.vD.set(enemy.position.x, hitY, enemy.position.z);
+        hit = segmentSphereHit(prev, p.position, enemyCenter, r) !== null;
+      } else {
+        const dx = p.position.x - enemy.position.x;
+        const dy = p.position.y - hitY;
+        const dz = p.position.z - enemy.position.z;
+        hit = dx*dx + dy*dy + dz*dz < r * r;
+      }
+      if (hit) {
         if (p.userData.isMissile) {
           // Missiles explode on impact with splash damage
           explodeMissile(p, p.position.clone());
