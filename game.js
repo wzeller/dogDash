@@ -103,6 +103,16 @@ function levelBounds(level) {
 const KEYS = {};
 const MOUSE = { x: 0, y: 0, dx: 0, dy: 0, locked: false };
 
+// Reusable scratch vectors so hot per-frame loops don't allocate new THREE.Vector3
+// every frame — was the major cause of periodic GC pauses (1-2 sec freezes).
+const SCRATCH = {
+  vA: new THREE.Vector3(),
+  vB: new THREE.Vector3(),
+  vC: new THREE.Vector3(),
+  vD: new THREE.Vector3(),
+};
+const MAX_PARTICLES = 80;   // hard cap on scene.userData.particles so explosions can't unbound the heap
+
 // ─── Touch input (iPad / iPhone) ─────────────────────────────────────────────
 // Activated when (pointer: coarse). Coexists with desktop controls — both work.
 const TOUCH = {
@@ -385,7 +395,7 @@ function onResize() {
 // ─── Ocean Level: Surface ────────────────────────────────────────────────────
 function buildOceanSurface() {
   // ── Water surface ──
-  const waterGeo = new THREE.PlaneGeometry(80, 80, 60, 60);
+  const waterGeo = new THREE.PlaneGeometry(80, 80, 30, 30);   // 30×30 = 900 verts, was 60×60 = 3600
   const waterMat = new THREE.MeshStandardMaterial({
     color: 0x1a5b8a,
     roughness: 0.35,
@@ -3829,15 +3839,13 @@ function spawnCat(x, z) {
   aura.position.y = 0.4;
   cat.add(aura);
 
-  // Eyes — bright alien green
+  // Eyes — bright alien green (MeshBasicMaterial already glows; no PointLight
+  // needed. Per-enemy PointLights force Three.js to recompile every Standard
+  // material's shader on wave spawn — that was the dungeon's 1-2s freeze.)
   for (const sx of [-0.1, 0.1]) {
     const eye = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6), eyeMat);
     eye.position.set(sx, 0.85, 0.48);
     cat.add(eye);
-    // Eye glow
-    const glow = new THREE.PointLight(0x00ffaa, 0.4, 1.5, 2);
-    glow.position.copy(eye.position);
-    cat.add(glow);
   }
 
   // Ears (pointy alien)
@@ -4293,10 +4301,8 @@ function updateProjectiles(dt) {
       continue;
     }
 
-    // Check enemy hits
-    // Boss is special: use the laser's full path-this-frame vs the weak-point
-    // sphere, so fast-moving lasers can't skip past the target.
-    const prev = new THREE.Vector3(
+    // Check enemy hits — reuse SCRATCH vectors instead of allocating per frame.
+    const prev = SCRATCH.vA.set(
       p.position.x - p.userData.velocity.x * dt,
       p.position.y - p.userData.velocity.y * dt,
       p.position.z - p.userData.velocity.z * dt,
@@ -4307,12 +4313,11 @@ function updateProjectiles(dt) {
       if (enemy.userData.isBoss) {
         const weak = enemy.userData.weakPoint;
         if (!weak) continue;
-        const wPos = new THREE.Vector3();
-        weak.getWorldPosition(wPos);
+        const wPos = weak.getWorldPosition(SCRATCH.vB);
         const wr = enemy.userData.weakRadius || 2.4;
         const tt = segmentSphereHit(prev, p.position, wPos, wr);
-        if (tt === null) continue;   // miss — laser passes through, no deflect
-        const hitPos = new THREE.Vector3().copy(prev).lerp(p.position, tt);
+        if (tt === null) continue;
+        const hitPos = SCRATCH.vC.copy(prev).lerp(p.position, tt);
         enemy.userData.health -= p.userData.damage;
         spawnBossSparks(hitPos, 0xffe060);
         spawnDamageNumber(hitPos, p.userData.damage, '#80ff80');
@@ -4631,10 +4636,9 @@ function spawnBonePickups(count) {
         group.add(knob);
       }
     }
-    // Glow underneath
-    const glow = new THREE.PointLight(0xffe090, 0.6, 2, 2);
-    glow.position.set(0, 0, 0);
-    group.add(glow);
+    // Bone glows via its emissive material — no per-pickup PointLight needed.
+    // (Each light forces all lit materials' shaders to recompile, and 6+ bones
+    // at scene start was a major contributor to dungeon stutter.)
 
     // Random floor position (away from walls and center)
     let px, pz;
@@ -5812,14 +5816,26 @@ function damagePlayer(amount) {
 function updateParticles(dt) {
   const particles = scene.userData.particles;
   if (!particles) return;
+  // Enforce hard cap — drop oldest particles if we somehow exceeded the limit.
+  // Prevents unbounded heap growth from rapid-fire boss sparks/explosions.
+  while (particles.length > MAX_PARTICLES) {
+    const old = particles.shift();
+    if (old.material && old.material.dispose) old.material.dispose();
+    scene.remove(old);
+  }
   for (let i = particles.length - 1; i >= 0; i--) {
     const p = particles[i];
     p.userData.life -= dt;
     p.userData.vel.y -= 9.8 * dt;
     p.position.addScaledVector(p.userData.vel, dt);
-    p.material.opacity = p.userData.life / 0.8;
+    if (p.material && p.material.opacity !== undefined) p.material.opacity = p.userData.life / 0.8;
     if (p.userData.life <= 0) {
       scene.remove(p);
+      // Dispose cloned materials (spawnBossSparks clones a material per particle)
+      // so GPU memory doesn't grow over the session.
+      if (p.material && p.material.dispose && !p.userData.sharedMaterial) {
+        p.material.dispose();
+      }
       particles.splice(i, 1);
     }
   }
@@ -5872,7 +5888,9 @@ function updateAtmosphere(dt) {
         pos.setZ(i, baseZ[i] + wave);
       }
       pos.needsUpdate = true;
-      water.geometry.computeVertexNormals();
+      // Note: skipping per-frame computeVertexNormals — at 60Hz on a 60x60 grid
+      // (3600 verts) it was the main per-frame cost on ocean-surface and a big
+      // contributor to GC pauses. Visual quality without it is fine for arcade play.
     }
     const boat = scene.userData.boat;
     if (boat) {
