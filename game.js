@@ -113,7 +113,15 @@ const TOUCH = {
 };
 
 function isTouchDevice() {
-  return window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  // URL override lets you force either mode for testing: ?touch=1 / ?touch=0
+  const force = new URLSearchParams(location.search).get('touch');
+  if (force === '1') return true;
+  if (force === '0') return false;
+  // Real touch requires both: an actual touch surface AND coarse as the primary pointer.
+  // A touchscreen laptop with mouse primary correctly returns false here.
+  const hasTouchPoints = (navigator.maxTouchPoints || 0) > 0;
+  const coarsePrimary = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  return hasTouchPoints && coarsePrimary;
 }
 
 // Wrapper used everywhere instead of canvas.requestPointerLock() directly.
@@ -127,10 +135,22 @@ function lockPointer() {
   document.getElementById('canvas').requestPointerLock();
 }
 
+function applyTouchClasses() {
+  if (!document.body.classList.contains('touch-mode')) return;
+  document.body.classList.toggle('narrow', Math.min(window.innerWidth, window.innerHeight) <= 700);
+  document.body.classList.toggle('portrait', window.innerHeight > window.innerWidth);
+}
+
 function initTouchControls() {
   if (!isTouchDevice()) return;
   TOUCH.active = true;
 
+  // Mark body so CSS can scope every touch-only style. Desktop never gets these
+  // even if (pointer: coarse) is accidentally matched by something.
+  document.body.classList.add('touch-mode');
+  applyTouchClasses();
+  window.addEventListener('resize', applyTouchClasses);
+  window.addEventListener('orientationchange', applyTouchClasses);
   const ui = document.getElementById('touch-ui');
   if (ui) ui.style.display = 'block';
 
