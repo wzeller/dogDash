@@ -169,7 +169,9 @@ function initTouchControls() {
     TOUCH.lookY = ny;
   });
 
-  // Auto-fire helper: shoots immediately on press, then on a fixed interval while held
+  // Auto-fire helper: shoots immediately on press, then on a fixed interval while held.
+  // Touch-only — desktop uses Space/Click via the existing onClick handler so we don't
+  // risk a stuck setInterval if a mousedown/mouseup pair is lost.
   function bindAutoFire(btnId, action, intervalMs) {
     const btn = document.getElementById(btnId);
     if (!btn) return;
@@ -179,7 +181,7 @@ function initTouchControls() {
       e.preventDefault(); e.stopPropagation();
       if (!STATE.started || STATE.gameover) return;
       if (e.changedTouches && e.changedTouches[0]) touchId = e.changedTouches[0].identifier;
-      action();           // immediate fire on press
+      action();
       if (timerId !== null) return;
       timerId = setInterval(() => {
         if (!STATE.started || STATE.gameover) { stop(); return; }
@@ -200,9 +202,6 @@ function initTouchControls() {
     btn.addEventListener('touchstart', start, { passive: false });
     btn.addEventListener('touchend', stop, { passive: false });
     btn.addEventListener('touchcancel', stop, { passive: false });
-    btn.addEventListener('mousedown', start);
-    btn.addEventListener('mouseup', stop);
-    btn.addEventListener('mouseleave', stop);
   }
 
   // FIRE: 8 shots/sec (matches feel of a manual click-spammer but consistent).
@@ -4116,8 +4115,24 @@ function visorPlanetText(level) {
 
 // ─── Player Movement ──────────────────────────────────────────────────────────
 function updatePlayer(dt) {
+  // If any keyboard movement key is down, treat keyboard as authoritative and
+  // zero out any stale touch input (e.g. a touchscreen laptop that registered a
+  // ghost touch). Prevents "drifting by itself" complaints on hybrid devices.
+  if (KEYS['KeyW'] || KEYS['KeyA'] || KEYS['KeyS'] || KEYS['KeyD'] ||
+      KEYS['ArrowUp'] || KEYS['ArrowDown'] || KEYS['ArrowLeft'] || KEYS['ArrowRight']) {
+    TOUCH.moveX = 0; TOUCH.moveZ = 0;
+    TOUCH.lookX = 0; TOUCH.lookY = 0;
+  }
+
+  // Deadzone — ignore tiny stick deflections so accidental touches don't drift the player
+  const DEAD = 0.08;
+  const tmx = Math.abs(TOUCH.moveX) > DEAD ? TOUCH.moveX : 0;
+  const tmz = Math.abs(TOUCH.moveZ) > DEAD ? TOUCH.moveZ : 0;
+  const tlx = Math.abs(TOUCH.lookX) > DEAD ? TOUCH.lookX : 0;
+  const tly = Math.abs(TOUCH.lookY) > DEAD ? TOUCH.lookY : 0;
+
   // Touch right-stick deflection ≥ 0.85 also counts as "running" (no shift key on iPad)
-  const touchStickMag = Math.sqrt(TOUCH.moveX*TOUCH.moveX + TOUCH.moveZ*TOUCH.moveZ);
+  const touchStickMag = Math.sqrt(tmx*tmx + tmz*tmz);
   const touchRunning = TOUCH.active && touchStickMag > 0.85;
   const speed = PLAYER_SPEED * ((KEYS['ShiftLeft'] || KEYS['ShiftRight'] || touchRunning) ? RUN_MULT : 1);
 
@@ -4125,15 +4140,15 @@ function updatePlayer(dt) {
   // Cockpit/flight modes use much slower rates — you're aiming at distant ships with
   // a fixed cockpit frame, so a fast sweep overshoots constantly. Foot levels keep
   // the snappy ~275°/s rate. A x*|x|^0.6 curve keeps small deflections precise.
-  if (TOUCH.active) {
+  if (TOUCH.active && (tlx !== 0 || tly !== 0)) {
     const inFlight = STATE.level === 'space-cockpit'
       || STATE.level === 'neptune-approach'
       || STATE.level === 'saturn-approach';
     const TOUCH_LOOK_RATE_X = inFlight ?  700 : 2400;
     const TOUCH_LOOK_RATE_Y = inFlight ?  500 : 1800;
     const curve = (v) => Math.sign(v) * Math.pow(Math.abs(v), 1.6);
-    MOUSE.dx += curve(TOUCH.lookX) * TOUCH_LOOK_RATE_X * dt;
-    MOUSE.dy += curve(TOUCH.lookY) * TOUCH_LOOK_RATE_Y * dt;
+    MOUSE.dx += curve(tlx) * TOUCH_LOOK_RATE_X * dt;
+    MOUSE.dy += curve(tly) * TOUCH_LOOK_RATE_Y * dt;
   }
 
   // Mouse look
@@ -4155,9 +4170,9 @@ function updatePlayer(dt) {
   if (KEYS['KeyS'] || KEYS['ArrowDown'])  move.z += 1;
   if (KEYS['KeyA'] || KEYS['ArrowLeft'])  move.x -= 1;
   if (KEYS['KeyD'] || KEYS['ArrowRight']) move.x += 1;
-  if (TOUCH.active) {
-    move.x += TOUCH.moveX;
-    move.z += TOUCH.moveZ;
+  if (TOUCH.active && (tmx !== 0 || tmz !== 0)) {
+    move.x += tmx;
+    move.z += tmz;
   }
   if (move.lengthSq() > 1) move.normalize();
   move.applyEuler(new THREE.Euler(0, playerYaw, 0));
