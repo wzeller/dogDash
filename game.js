@@ -5816,11 +5816,12 @@ function damagePlayer(amount) {
 function updateParticles(dt) {
   const particles = scene.userData.particles;
   if (!particles) return;
-  // Enforce hard cap — drop oldest particles if we somehow exceeded the limit.
-  // Prevents unbounded heap growth from rapid-fire boss sparks/explosions.
+  // Hard cap: drop oldest scene-particles so explosions can't unbound the heap.
+  // We *don't* dispose materials here — some particle spawners share one
+  // material across their batch (e.g. spawnDeathParticles), and disposing it
+  // would break every sibling particle still rendering.
   while (particles.length > MAX_PARTICLES) {
     const old = particles.shift();
-    if (old.material && old.material.dispose) old.material.dispose();
     scene.remove(old);
   }
   for (let i = particles.length - 1; i >= 0; i--) {
@@ -5831,11 +5832,6 @@ function updateParticles(dt) {
     if (p.material && p.material.opacity !== undefined) p.material.opacity = p.userData.life / 0.8;
     if (p.userData.life <= 0) {
       scene.remove(p);
-      // Dispose cloned materials (spawnBossSparks clones a material per particle)
-      // so GPU memory doesn't grow over the session.
-      if (p.material && p.material.dispose && !p.userData.sharedMaterial) {
-        p.material.dispose();
-      }
       particles.splice(i, 1);
     }
   }
@@ -5888,9 +5884,10 @@ function updateAtmosphere(dt) {
         pos.setZ(i, baseZ[i] + wave);
       }
       pos.needsUpdate = true;
-      // Note: skipping per-frame computeVertexNormals — at 60Hz on a 60x60 grid
-      // (3600 verts) it was the main per-frame cost on ocean-surface and a big
-      // contributor to GC pauses. Visual quality without it is fine for arcade play.
+      // Keep the normal recompute — without it the displaced surface lights
+      // wrong (looks "glitchy"). The water plane is now 30×30 = 900 verts
+      // (was 60×60) so this is ~4× cheaper than before.
+      water.geometry.computeVertexNormals();
     }
     const boat = scene.userData.boat;
     if (boat) {
