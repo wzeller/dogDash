@@ -5349,7 +5349,9 @@ function checkDoorTransition() {
 function victoryGame() {
   transitioning = true;
   STATE.gameover = true;  // freeze gameplay
-  document.exitPointerLock();
+  try { document.exitPointerLock(); } catch (e) { /* no-op on touch */ }
+  hideAllOverlaysExceptGameOver();
+  TOUCH.moveX = 0; TOUCH.moveZ = 0; TOUCH.lookX = 0; TOUCH.lookY = 0;
   // Re-theme victory screen depending on how we got here
   const t = document.getElementById('victory-title');
   const s1 = document.getElementById('victory-sub1');
@@ -5387,7 +5389,9 @@ function victoryGame() {
   overlay.style.background = '#ffffff';
   overlay.style.opacity = '1';
   setTimeout(() => {
-    document.getElementById('victory-screen').style.display = 'flex';
+    const vs = document.getElementById('victory-screen');
+    vs.classList.add('shown');
+    vs.style.display = 'flex';
     overlay.style.opacity = '0';
     overlay.style.background = '#000';
   }, 700);
@@ -6274,12 +6278,9 @@ function showMessage(text, duration = 2000) {
 
 function gameOver() {
   STATE.gameover = true;
-  document.exitPointerLock();
-  // On touch devices, hide the joysticks/FIRE button so they don't intercept
-  // taps meant for the game-over screen and so the "stuck stick" state can't
-  // keep dragging the camera around behind the overlay.
-  const tui = document.getElementById('touch-ui');
-  if (tui && TOUCH.active) tui.style.display = 'none';
+  try { document.exitPointerLock(); } catch (e) { /* no-op on touch */ }
+  // Hide everything that could obscure the game-over overlay on mobile
+  hideAllOverlaysExceptGameOver();
   TOUCH.moveX = 0; TOUCH.moveZ = 0; TOUCH.lookX = 0; TOUCH.lookY = 0;
   const showLevelBtn = currentRoom > 1 || STATE.level !== 'dungeon';
   const btn = document.getElementById('restart-level-btn');
@@ -6289,7 +6290,19 @@ function gameOver() {
       ? `RETRY ROOM ${currentRoom}`
       : `RETRY ${levelLabel(STATE.level, currentRoom)}`;
   }
-  document.getElementById('restart-screen').style.display = 'flex';
+  const rs = document.getElementById('restart-screen');
+  rs.classList.add('shown');
+  rs.style.display = 'flex';   // belt and suspenders alongside the class
+}
+
+function hideAllOverlaysExceptGameOver() {
+  // Anything that could sit at or above z-index 100 and visually block the
+  // game-over screen on iOS Safari (where stacking can be quirky).
+  const ids = ['touch-ui', 'visor', 'play-hint', 'dev-menu', 'start-screen', 'message'];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  }
 }
 
 // Shared teardown + rebuild used by full restart, level restart, and victory restart.
@@ -6345,13 +6358,18 @@ function rebuildLevel(fromBeginning) {
   buildLevel(STATE.level);
 
   document.getElementById('room-num').textContent = levelLabel(STATE.level, currentRoom);
-  document.getElementById('restart-screen').style.display = 'none';
-  // Re-show touch UI if the game-over hid it
+  const rs = document.getElementById('restart-screen');
+  rs.classList.remove('shown');
+  rs.style.display = 'none';
+  const vs = document.getElementById('victory-screen');
+  vs.classList.remove('shown');
+  vs.style.display = 'none';
+  // Re-show overlays that gameOver hid (touch UI, visor)
   if (TOUCH.active) {
     const tui = document.getElementById('touch-ui');
     if (tui) tui.style.display = 'block';
   }
-  document.getElementById('victory-screen').style.display = 'none';
+  // Visor visibility is set fresh by buildLevel via setSpacesuitVisor for each level
   // rebuildLevel runs from a button click (Try Again / Retry Level / dev menu warp),
   // so we have a user gesture and can safely auto-lock the pointer.
   lockPointer();

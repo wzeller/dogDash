@@ -168,6 +168,15 @@
       box-shadow: 0 0 12px #ff6b35;
     }
 
+    /* Force the game-over/victory overlays above absolutely everything on mobile.
+       Setting style.display via JS sometimes fights iOS Safari's inline-style
+       resolution — using a class with !important is the bulletproof path. */
+    #restart-screen.shown,
+    #victory-screen.shown {
+      display: flex !important;
+      z-index: 9999 !important;
+    }
+
     @keyframes flicker {
       0%, 95%, 100% { opacity: 1; }
       96% { opacity: 0.4; }
