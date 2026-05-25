@@ -313,10 +313,12 @@ const PLAYER_HEIGHT = 1.1;
 function init() {
   clock = new THREE.Clock();
 
-  // Renderer (cheaper settings on touch devices — DPR=1, no antialias, no shadows)
+  // Renderer (cheaper settings on touch devices — DPR=1, no antialias, no shadows).
+  // Note: no powerPreference flag — letting the browser pick. Forcing 'high-performance'
+  // on macOS triggered discrete-GPU switching hitches and visual glitches on desktops.
   const touchMode = isTouchDevice();
   const canvas = document.getElementById('canvas');
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: !touchMode, powerPreference: 'high-performance' });
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: !touchMode });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(touchMode ? 1 : Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = !touchMode;
