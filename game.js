@@ -44,10 +44,11 @@ const STATE = {
   gameover: false,
   difficulty: 'normal',
   level: 'dungeon',   // 'dungeon' | 'ocean-*' | 'space-*'
+  freedDogColors: [],  // remembered fur colors of each cage dog freed in rocket-interior; spawned on Earth
 };
 const DUNGEON_ROOMS = 3;       // rooms 1..3 are dungeon
 const OCEAN_LEVELS = ['ocean-surface', 'ocean-underwater', 'pirate-ship']; // rooms 4..6
-const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface', 'jupiter-surface', 'cat-ship-hijack', 'mars-approach', 'mars-surface', 'rocket-interior']; // rooms 7..18
+const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface', 'jupiter-surface', 'cat-ship-hijack', 'mars-approach', 'mars-surface', 'rocket-interior', 'earth']; // rooms 7..19
 const OCEAN_BOUND = 18;
 const UNDERWATER_BOUND = 22;
 const SHIP_BOUND_X = 4.5;       // pirate ship deck half-width
@@ -63,6 +64,8 @@ const JUPITER_BOUND = 26;       // jupiter surface: stormy cloud deck
 const MARS_BOUND    = 26;       // mars surface: rocky red plain
 const ROCKET_INT_BOUND_X = 3.6; // rocket interior: tight cabin
 const ROCKET_INT_BOUND_Z = 12;
+const EARTH_BOUND_X = 14;       // earth neighborhood: wider than tall
+const EARTH_BOUND_Z = 30;
 
 function levelForRoom(n) {
   if (n <= DUNGEON_ROOMS) return 'dungeon';
@@ -94,6 +97,7 @@ function levelLabel(level, roomNum) {
   if (level === 'mars-approach') return 'TO MARS';
   if (level === 'mars-surface') return 'MARS';
   if (level === 'rocket-interior') return 'EARTH ROCKET';
+  if (level === 'earth') return 'EARTH';
   return '?';
 }
 function levelBounds(level) {
@@ -112,6 +116,7 @@ function levelBounds(level) {
   if (level === 'mars-approach') return [SPACE_BOUND_X, SPACE_BOUND_Z];
   if (level === 'mars-surface') return [MARS_BOUND, MARS_BOUND];
   if (level === 'rocket-interior') return [ROCKET_INT_BOUND_X, ROCKET_INT_BOUND_Z];
+  if (level === 'earth') return [EARTH_BOUND_X, EARTH_BOUND_Z];
   return [DUNGEON_BOUND, DUNGEON_BOUND];
 }
 
@@ -4608,7 +4613,25 @@ function buildRocketInterior() {
   }
 
   // ── Door at z = +3 (mid-cabin), separating front from kennel ──
-  // Frame
+  // Solid bulkhead across the cabin at z=3, with the doorway opening cut out.
+  // The bulkhead is built as four wallMat panels: above the doorway, below
+  // (door panel takes care of that), and on each side from the door post out
+  // to the cabin's side wall. Without these the kennel could be seen between
+  // the frame and the cabin walls — the "cracks" reported.
+  const bulkheadMat = wallMat;
+  // Above-door panel (y from frame-top 3.15 up to ceiling H=4, width = doorway = 3.2m)
+  const aboveDoor = new THREE.Mesh(new THREE.BoxGeometry(3.2, H - 3.15, 0.18), bulkheadMat);
+  aboveDoor.position.set(0, (3.15 + H) / 2, 3);
+  scene.add(aboveDoor);
+  // Side fillers — from doorway post outward to the cabin side wall
+  // Doorway opening is x = [-1.6, +1.6]; cabin walls are at x = ±4.
+  for (const sx of [-1, 1]) {
+    const sideFillW = (W / 2) - 1.6;       // 4 - 1.6 = 2.4m
+    const sideFill = new THREE.Mesh(new THREE.BoxGeometry(sideFillW, H, 0.18), bulkheadMat);
+    sideFill.position.set(sx * (1.6 + sideFillW / 2), H / 2, 3);
+    scene.add(sideFill);
+  }
+  // Frame trim
   const doorFrameMat = trimMat;
   const frameTop = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.3, 0.4), doorFrameMat);
   frameTop.position.set(0, 3.0, 3);
@@ -4646,26 +4669,32 @@ function buildRocketInterior() {
   for (let i = 0; i < cagePositions.length; i++) {
     const [cx, cz] = cagePositions[i];
     const cage = new THREE.Group();
+    // sign tells us which side the corridor is on. corridor is always at x = 0.
+    // For right cage (cx > 0): corridor at local -x → bars on local -x face.
+    // For left cage  (cx < 0): corridor at local +x → bars on local +x face.
+    const sign = cx > 0 ? 1 : -1;
+    const frontFaceX = -sign * 0.8;     // corridor-facing local x
+    const backFaceX  =  sign * 0.8;     // wall opposite the corridor
+
     // Cage floor
     const cageFloor = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 1.6), cageFloorMat);
     cageFloor.position.set(0, 0.05, 0);
     cage.add(cageFloor);
-    // Back wall
-    const back = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.6, 0.1), cageBarMat);
-    back.position.set(0, 0.8, -0.8 * Math.sign(cx));   // back wall away from corridor
+    // Back wall (opposite the corridor — fills the local x = backFaceX face)
+    const back = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.6, 1.6), cageBarMat);
+    back.position.set(backFaceX, 0.8, 0);
     cage.add(back);
-    // Side walls
-    for (const sz of [-1, 1]) {
-      const side = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.6, 1.6), cageBarMat);
-      side.position.set(0.8 * (cx > 0 ? -1 : 1), 0.8, sz * 0.8);
+    // Two side walls (perpendicular to corridor — local z = ±0.8 faces)
+    for (const sz of [-0.8, 0.8]) {
+      const side = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.6, 0.1), cageBarMat);
+      side.position.set(0, 0.8, sz);
       cage.add(side);
     }
     // Top
     const top = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 1.6), cageBarMat);
     top.position.set(0, 1.6, 0);
     cage.add(top);
-    // Front bars (the bars that face the corridor)
-    const frontFaceX = cx > 0 ? -0.8 : 0.8;
+    // Front bars (corridor-facing)
     const cageFront = new THREE.Group();
     for (let b = -3; b <= 3; b++) {
       const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.55, 8), cageBarMat);
@@ -4681,10 +4710,12 @@ function buildRocketInterior() {
     cageLock.position.set(frontFaceX, 1.0, 0);
     cage.add(cageLock);
 
-    // Dog inside
+    // Dog inside — face the corridor so the player sees their face through the bars.
+    // Dog's local +Z is forward. For right cage we need forward = -x → rotation.y = +π/2.
+    // For left cage we need forward = +x → rotation.y = -π/2.
     const dog = buildKenneledDog();
     dog.position.set(0, 0, 0);
-    dog.rotation.y = cx > 0 ? -Math.PI / 2 : Math.PI / 2;   // face the bars
+    dog.rotation.y = sign > 0 ? Math.PI / 2 : -Math.PI / 2;
     cage.add(dog);
 
     cage.position.set(cx, 0, cz);
@@ -4731,6 +4762,7 @@ function buildKenneledDog() {
   const g = new THREE.Group();
   const furColors = [0xc0804a, 0xa06038, 0xe8b070, 0xfff0c8, 0x303030];
   const c = furColors[Math.floor(Math.random() * furColors.length)];
+  g.userData.furColor = c;
   const fur = new THREE.MeshStandardMaterial({ color: c, roughness: 0.85 });
   const darkFur = new THREE.MeshStandardMaterial({ color: 0x402810, roughness: 0.9 });
   const eyeMat = new THREE.MeshBasicMaterial({ color: 0x100808 });
@@ -4840,6 +4872,10 @@ function rocketInteract() {
   // Open the cage
   best.opened = true;
   ROCKET_INT.freed++;
+  // Remember the dog's fur colour so we can spawn the SAME dog on Earth
+  if (best.dog && best.dog.userData.furColor !== undefined) {
+    STATE.freedDogColors.push(best.dog.userData.furColor);
+  }
   // Remove front bars + lock
   if (best.front) best.group.remove(best.front);
   if (best.lock) best.lock.material.color.setHex(0x40ff60);
@@ -4861,8 +4897,9 @@ function triggerEarthLanding() {
   overlay.style.opacity = '0';
   setTimeout(() => { overlay.style.opacity = '1'; }, 1500);
   setTimeout(() => {
-    overlay.style.background = '#000';
-    victoryGame();    // earth-theme victory (see victoryGame)
+    overlay.style.background = '#000';   // reset for loadNextRoom's own fade
+    transitioning = false;
+    loadNextRoom();                       // → room 19 = earth
   }, 2700);
 }
 
@@ -4927,6 +4964,673 @@ function updateRocketInterior(dt) {
     c.dog.position.y = (c.opened ? 0 : 0) + Math.sin(t * 3 + c.dog.userData.bobPhase) * 0.04;
     if (c.dog.userData.tail) c.dog.userData.tail.rotation.z = Math.sin(t * 6 + c.dog.userData.bobPhase) * 0.6;
   }
+}
+
+// ─── Earth — homecoming neighborhood ────────────────────────────────────────
+// Final level. Walk each of the 6 freed dogs along their scent trail to their
+// house, dodging cars on the road. After all delivered, the protagonist's home
+// lights up at the far end of the street; walking up triggers the 'HOME' fade.
+const EARTH = {
+  dogs: [],            // [{ id, mesh, color, trailDots[], homeIndex, delivered, following }]
+  houses: [],          // [{ index, x, z, doormat, doorMesh, doorOpen, dogColor }]
+  cars: [],            // [{ mesh, vel, length, width }]
+  currentDog: null,
+  delivered: 0,
+  protagonistHome: null,
+  finalPathLit: false,
+};
+
+function buildEarth() {
+  // Reset state
+  EARTH.dogs.length = 0;
+  EARTH.houses.length = 0;
+  EARTH.cars.length = 0;
+  EARTH.currentDog = null;
+  EARTH.delivered = 0;
+  EARTH.protagonistHome = null;
+  EARTH.finalPathLit = false;
+
+  // ── Ground / lawn ──
+  const lawnMat = new THREE.MeshStandardMaterial({ color: 0x3a6028, roughness: 0.95 });
+  const lawn = new THREE.Mesh(new THREE.PlaneGeometry(60, 80), lawnMat);
+  lawn.rotation.x = -Math.PI / 2;
+  lawn.receiveShadow = true;
+  scene.add(lawn);
+
+  // ── Main road running N-S through the centre (x: -3.5..+3.5) ──
+  const roadMat = new THREE.MeshStandardMaterial({ color: 0x202428, roughness: 0.7, metalness: 0.1 });
+  const road = new THREE.Mesh(new THREE.PlaneGeometry(7, 70), roadMat);
+  road.rotation.x = -Math.PI / 2;
+  road.position.y = 0.01;
+  scene.add(road);
+  // Dashed yellow centre line
+  const dashMat = new THREE.MeshBasicMaterial({ color: 0xffdc40 });
+  for (let z = -32; z <= 32; z += 2.4) {
+    const dash = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 1.2), dashMat);
+    dash.rotation.x = -Math.PI / 2;
+    dash.position.set(0, 0.02, z);
+    scene.add(dash);
+  }
+  // White edge stripes
+  for (const sx of [-3.45, 3.45]) {
+    const edge = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.12, 70),
+      new THREE.MeshBasicMaterial({ color: 0xeae8d8 })
+    );
+    edge.rotation.x = -Math.PI / 2;
+    edge.position.set(sx, 0.02, 0);
+    scene.add(edge);
+  }
+
+  // ── Sidewalks on each side ──
+  const walkMat = new THREE.MeshStandardMaterial({ color: 0x8a8478, roughness: 0.85 });
+  for (const sx of [-1, 1]) {
+    const walk = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 70), walkMat);
+    walk.rotation.x = -Math.PI / 2;
+    walk.position.set(sx * 4.4, 0.03, 0);
+    scene.add(walk);
+    // Sidewalk seams every 2.5m
+    for (let z = -32; z <= 32; z += 2.5) {
+      const seam = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.04), new THREE.MeshBasicMaterial({ color: 0x504a40 }));
+      seam.rotation.x = -Math.PI / 2;
+      seam.position.set(sx * 4.4, 0.04, z);
+      scene.add(seam);
+    }
+  }
+
+  // ── Dusk sky dome ──
+  // Light blue at top, pinkish near the horizon
+  const skyGeo = new THREE.SphereGeometry(70, 32, 18);
+  const skyMat = new THREE.MeshBasicMaterial({ color: 0x4a6a98, side: THREE.BackSide, fog: false });
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+  // Horizon band
+  const horizon = new THREE.Mesh(
+    new THREE.CylinderGeometry(68, 68, 8, 32, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xff9070, side: THREE.BackSide, transparent: true, opacity: 0.6, fog: false })
+  );
+  horizon.position.y = 4;
+  scene.add(horizon);
+  // A few faint stars peeking out
+  const starGeo = new THREE.BufferGeometry();
+  const STARS = 90;
+  const starPos = new Float32Array(STARS * 3);
+  for (let i = 0; i < STARS; i++) {
+    starPos[i*3 + 0] = (Math.random() - 0.5) * 100;
+    starPos[i*3 + 1] = 20 + Math.random() * 30;
+    starPos[i*3 + 2] = (Math.random() - 0.5) * 100;
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.3, transparent: true, opacity: 0.6, fog: false })));
+
+  // ── 6 houses, alternating sides along the street ──
+  // House Z positions and which side (sx = -1 left, +1 right)
+  const houseLayout = [
+    { z:  18, side: -1 },
+    { z:  18, side:  1 },
+    { z:   6, side: -1 },
+    { z:   6, side:  1 },
+    { z:  -6, side: -1 },
+    { z:  -6, side:  1 },
+  ];
+  // Assign each house an index 0..5 — we'll match dogs to these via random permutation below
+  const houseColors = [0xa83030, 0x3060a0, 0x90a040, 0x806040, 0xc09040, 0x6080a8];
+  for (let i = 0; i < 6; i++) {
+    const { z, side } = houseLayout[i];
+    const h = buildEarthHouse(side, z, houseColors[i]);
+    EARTH.houses.push({
+      index: i,
+      x: side * 9,
+      z,
+      side,
+      doormat: h.doormat,
+      doorMesh: h.door,
+      window: h.window,
+      doorOpen: false,
+      dogColor: 0xffffff, // filled below after permutation
+    });
+    // Block the house's footprint so the player can't walk through it
+    addLevelBox(side * 9 - 2.5, side * 9 + 2.5, z - 1.8, z + 1.8);
+  }
+
+  // ── Protagonist home — at the north end of the street, lit warmly ──
+  EARTH.protagonistHome = buildProtagonistHome();
+
+  // ── Streetlights along the sidewalks ──
+  for (let z = -22; z <= 22; z += 11) {
+    for (const sx of [-1, 1]) {
+      const post = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.07, 0.07, 4.0, 8),
+        new THREE.MeshStandardMaterial({ color: 0x202428, metalness: 0.5 })
+      );
+      post.position.set(sx * 4.0, 2.0, z);
+      scene.add(post);
+      const lamp = new THREE.Mesh(
+        new THREE.SphereGeometry(0.22, 12, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffeec0 })
+      );
+      lamp.position.set(sx * 4.0, 4.05, z);
+      scene.add(lamp);
+    }
+  }
+
+  // ── Lighting ──
+  const amb = new THREE.AmbientLight(0x8090b0, 0.85);
+  scene.add(amb);
+  scene.userData.ambient = amb;
+  const dusk = new THREE.DirectionalLight(0xffb070, 0.7);
+  dusk.position.set(-25, 18, -10);
+  scene.add(dusk);
+  const hemi = new THREE.HemisphereLight(0xa0c0e0, 0x405028, 0.65);
+  scene.add(hemi);
+
+  // ── Place 6 dogs at the spawn (the rocket landing pad at z = +25) ──
+  // Use saved fur colors from STATE.freedDogColors; if dev-warped straight here,
+  // pick sensible defaults.
+  const defaults = [0xc0804a, 0xa06038, 0xe8b070, 0xfff0c8, 0x303030, 0xd0a070];
+  const colors = (STATE.freedDogColors && STATE.freedDogColors.length === 6)
+    ? STATE.freedDogColors.slice()
+    : defaults.slice();
+  // Shuffle which house each dog is matched to so every playthrough is different
+  const houseOrder = [0, 1, 2, 3, 4, 5];
+  for (let i = houseOrder.length - 1; i > 0; i--) {
+    const k = Math.floor(Math.random() * (i + 1));
+    [houseOrder[i], houseOrder[k]] = [houseOrder[k], houseOrder[i]];
+  }
+  // Write back the matched dog color onto each house (so the front-window glow + doormat tint
+  // can hint at the dog color if you look carefully)
+  for (let i = 0; i < 6; i++) {
+    EARTH.houses[houseOrder[i]].dogColor = colors[i];
+    if (EARTH.houses[houseOrder[i]].doormat) {
+      EARTH.houses[houseOrder[i]].doormat.material.color.setHex(colors[i]);
+    }
+  }
+  // Place dogs in a small cluster at spawn
+  for (let i = 0; i < 6; i++) {
+    const angle = (i / 6) * Math.PI * 2;
+    const dx = Math.cos(angle) * 1.4;
+    const dz = Math.sin(angle) * 1.4;
+    const homeIdx = houseOrder[i];
+    const home = EARTH.houses[homeIdx];
+    const mesh = buildEarthDog(colors[i]);
+    mesh.userData.spawnX = dx;
+    mesh.userData.spawnZ = 25 + dz;
+    mesh.position.set(mesh.userData.spawnX, 0, mesh.userData.spawnZ);
+    scene.add(mesh);
+    // Build a colored trail of dots from the spawn cluster to this dog's house
+    const trail = buildScentTrail(mesh.userData.spawnX, mesh.userData.spawnZ, home, colors[i]);
+    EARTH.dogs.push({
+      id: i,
+      mesh,
+      color: colors[i],
+      homeIndex: homeIdx,
+      trailDots: trail.dots,
+      trailGroup: trail.group,
+      delivered: false,
+      following: false,
+    });
+  }
+
+  // ── Cars on the road ──
+  // Two cars: one going north, one going south, at different speeds.
+  EARTH.cars.push(spawnEarthCar(-1.7,  -25,  6.0, 0xa83030));
+  EARTH.cars.push(spawnEarthCar( 1.7,   28, -7.5, 0x3060a0));
+  // Maybe a third if difficulty allows
+  if (Math.random() < 0.7) EARTH.cars.push(spawnEarthCar(-1.7, 12, 5.0, 0xe8c060));
+}
+
+function buildEarthHouse(side, z, houseColor) {
+  // side: -1 (left of street) or +1 (right)
+  const x = side * 9;
+  const houseMat = new THREE.MeshStandardMaterial({ color: houseColor, roughness: 0.85 });
+  const roofMat = new THREE.MeshStandardMaterial({ color: 0x402018, roughness: 0.9 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0xf0e8d0, roughness: 0.8 });
+  const windowMat = new THREE.MeshStandardMaterial({
+    color: 0xffd070, roughness: 0.4, metalness: 0.2,
+    emissive: 0xffa040, emissiveIntensity: 0.6,
+  });
+
+  const g = new THREE.Group();
+  // House body
+  const body = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 3), houseMat);
+  body.position.y = 1.5;
+  body.castShadow = true;
+  body.receiveShadow = true;
+  g.add(body);
+  // Roof (triangular prism via stretched box rotated)
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(2.9, 1.3, 4), roofMat);
+  roof.rotation.y = Math.PI / 4;
+  roof.position.y = 3.65;
+  roof.castShadow = true;
+  g.add(roof);
+  // Door facing the street
+  const doorMat = new THREE.MeshStandardMaterial({ color: 0x6a3010, roughness: 0.7 });
+  const door = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.6, 0.1), doorMat);
+  const doorFaceSign = -side;       // door faces toward street center
+  door.position.set(doorFaceSign * 0.0, 0.9, 0);
+  door.position.x = -side * 1.5;    // door on inside wall of house (toward street)
+  door.position.z = 0;
+  // Place door on the wall facing toward the street (x = -side * 2.05)
+  door.position.set(-side * 2.05, 0.9, 0);
+  door.rotation.y = -side * Math.PI / 2;
+  g.add(door);
+  // Window above door (glows warmer)
+  const win = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.55, 0.05), windowMat);
+  win.position.set(-side * 2.05, 2.1, 0);
+  win.rotation.y = -side * Math.PI / 2;
+  g.add(win);
+  // Front porch / step
+  const porch = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.18, 0.9), trimMat);
+  porch.position.set(-side * 2.8, 0.09, 0);
+  g.add(porch);
+  // Doormat — colored hint of which dog lives here (set after permutation)
+  const matMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, emissive: 0x402010, emissiveIntensity: 0.4 });
+  const doormat = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.6), matMat);
+  doormat.rotation.x = -Math.PI / 2;
+  doormat.position.set(-side * 3.4, 0.06, 0);
+  g.add(doormat);
+
+  g.position.set(x, 0, z);
+  scene.add(g);
+  return { group: g, doormat, door, window: win };
+}
+
+function buildProtagonistHome() {
+  // Same shape as the others but warmer color, decorated, far end of street.
+  const home = buildEarthHouse(-1, -28, 0xc05040);
+  // Override doormat color — protagonist is golden-retriever brown
+  home.doormat.material.color.setHex(0xd09060);
+  home.doormat.material.emissiveIntensity = 0.8;
+  // Brighter window
+  home.window.material.emissive.setHex(0xffe0a0);
+  home.window.material.emissiveIntensity = 1.2;
+  // Porch lamp (initially OFF — lights up after all 6 deliveries)
+  const lampPost = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.05, 0.05, 1.6, 8),
+    new THREE.MeshStandardMaterial({ color: 0x303030 })
+  );
+  lampPost.position.set(9 - 1.0, 0.8, -28 - 0.8);   // x = side*9 - 1 (left side, -1)... wait side=-1
+  // The home is at side=-1 so x = -9
+  lampPost.position.set(-9 + 1.0, 0.8, -28 - 0.8);
+  scene.add(lampPost);
+  const lampHead = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0x404040 })   // off
+  );
+  lampHead.position.set(-9 + 1.0, 1.65, -28 - 0.8);
+  scene.add(lampHead);
+  return {
+    group: home.group,
+    doormat: home.doormat,
+    doorMesh: home.door,
+    window: home.window,
+    lampHead,
+    x: -9,
+    z: -28,
+  };
+}
+
+// Build a small follower dog (3D — same recipe as the kennel dog but tagged for Earth)
+function buildEarthDog(furColor) {
+  const g = new THREE.Group();
+  const fur = new THREE.MeshStandardMaterial({ color: furColor, roughness: 0.85 });
+  const darkFur = new THREE.MeshStandardMaterial({ color: 0x402810, roughness: 0.9 });
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0x100808 });
+  const noseMat = new THREE.MeshStandardMaterial({ color: 0x100808, roughness: 0.5 });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 9), fur);
+  body.scale.set(1.1, 0.8, 1.4);
+  body.position.y = 0.32;
+  g.add(body);
+  for (const sx of [-0.18, 0.18]) {
+    for (const sz of [-0.3, 0.25]) {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.22, 6), fur);
+      leg.position.set(sx, 0.13, sz);
+      g.add(leg);
+    }
+  }
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 9), fur);
+  head.position.set(0, 0.55, 0.32);
+  g.add(head);
+  const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), fur);
+  muzzle.scale.set(0.9, 0.7, 1.2);
+  muzzle.position.set(0, 0.5, 0.48);
+  g.add(muzzle);
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 6), noseMat);
+  nose.position.set(0, 0.53, 0.6);
+  g.add(nose);
+  for (const sx of [-0.08, 0.08]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 6), eyeMat);
+    eye.position.set(sx, 0.62, 0.48);
+    g.add(eye);
+  }
+  for (const sx of [-0.18, 0.18]) {
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 6), darkFur);
+    ear.scale.set(0.5, 0.8, 0.3);
+    ear.position.set(sx, 0.6, 0.24);
+    ear.rotation.z = sx > 0 ? -0.4 : 0.4;
+    g.add(ear);
+  }
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.4, 6), fur);
+  tail.rotation.x = -0.6;
+  tail.position.set(0, 0.5, -0.38);
+  g.add(tail);
+  g.userData.tail = tail;
+  g.userData.bobPhase = Math.random() * Math.PI * 2;
+  g.userData.furColor = furColor;
+  return g;
+}
+
+// Lay a chain of small glowing dots from the dog's spawn point to its house's doormat.
+// Routes via the same-side sidewalk so trails don't cross the road indiscriminately —
+// each delivery requires exactly one road crossing.
+function buildScentTrail(spawnX, spawnZ, house, color) {
+  const group = new THREE.Group();
+  const dots = [];
+  // Build a 4-leg polyline path:
+  //   1. From spawn (centre-ish) over to the sidewalk on the same side as the house
+  //   2. Down/up that sidewalk to the z of the house
+  //   3. Across the road if needed (but house is already on that side)
+  //   4. To the doormat
+  const sideSign = house.side;
+  const sidewalkX = sideSign * 4.4;
+  const doormatX = sideSign * (house.x - sideSign * 3.4);   // = house.x - sideSign * 3.4
+  // Just use house's doormat world position:
+  const matWorld = new THREE.Vector3();
+  house.doormat.getWorldPosition(matWorld);
+
+  // Waypoints (xz):
+  const wps = [
+    [spawnX, spawnZ],
+    [sidewalkX * 0.6, spawnZ - 1.5],   // step toward the correct side
+    [sidewalkX, spawnZ - 2.5],          // onto the sidewalk
+    [sidewalkX, house.z + 1.0],         // walk along sidewalk to house z
+    [matWorld.x, matWorld.z],           // step onto doormat
+  ];
+
+  const dotMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.45 });
+  for (let i = 0; i < wps.length - 1; i++) {
+    const [x1, z1] = wps[i];
+    const [x2, z2] = wps[i + 1];
+    const dx = x2 - x1, dz = z2 - z1;
+    const len = Math.sqrt(dx*dx + dz*dz);
+    const steps = Math.max(2, Math.round(len / 0.6));
+    for (let s = 0; s < steps; s++) {
+      const t = s / steps;
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), dotMat);
+      dot.position.set(x1 + dx * t, 0.08, z1 + dz * t);
+      group.add(dot);
+      dots.push(dot);
+    }
+  }
+  scene.add(group);
+  return { group, dots };
+}
+
+function spawnEarthCar(x, z, vz, color) {
+  const car = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.5 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x101418, metalness: 0.8, roughness: 0.3 });
+  const tireMat = new THREE.MeshStandardMaterial({ color: 0x10100e, roughness: 0.9 });
+  const glassMat = new THREE.MeshStandardMaterial({ color: 0x60a0c0, transparent: true, opacity: 0.6, metalness: 0.3 });
+  const headlightMat = new THREE.MeshBasicMaterial({ color: 0xfffff0 });
+  const taillightMat = new THREE.MeshBasicMaterial({ color: 0xff3030 });
+
+  // Body lower
+  const lower = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.6, 3.6), bodyMat);
+  lower.position.y = 0.5;
+  car.add(lower);
+  // Body upper (cabin)
+  const upper = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.55, 1.8), bodyMat);
+  upper.position.y = 1.05;
+  upper.position.z = -0.1;
+  car.add(upper);
+  // Windshield + back window (glass panels at slight angle)
+  const wsF = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.5, 0.06), glassMat);
+  wsF.position.set(0, 1.0, 0.8);
+  wsF.rotation.x = -0.5;
+  car.add(wsF);
+  const wsB = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.5, 0.06), glassMat);
+  wsB.position.set(0, 1.0, -0.95);
+  wsB.rotation.x = 0.5;
+  car.add(wsB);
+  // 4 wheels
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1.3, 1.3]) {
+      const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.25, 16), tireMat);
+      wheel.rotation.z = Math.PI / 2;
+      wheel.position.set(sx * 0.78, 0.32, sz);
+      car.add(wheel);
+    }
+  }
+  // Headlights / taillights (lights face direction of travel)
+  const lightsZ = vz > 0 ? 1.85 : -1.85;
+  for (const sx of [-0.5, 0.5]) {
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 8), headlightMat);
+    head.position.set(sx, 0.58, lightsZ);
+    car.add(head);
+    const tail = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), taillightMat);
+    tail.position.set(sx, 0.58, -lightsZ);
+    car.add(tail);
+  }
+
+  car.position.set(x, 0, z);
+  scene.add(car);
+
+  return {
+    mesh: car,
+    vel: vz,
+    length: 3.6,
+    width: 1.6,
+  };
+}
+
+// Per-frame Earth update — picking up dogs, delivering, cars, ending
+function updateEarth(dt) {
+  if (STATE.level !== 'earth') return;
+  const t = clock.getElapsedTime();
+
+  // ── Cars: drive back and forth between z=±32, recycle ──
+  for (const c of EARTH.cars) {
+    c.mesh.position.z += c.vel * dt;
+    // Recycle when off the end
+    if (c.vel > 0 && c.mesh.position.z >  34) c.mesh.position.z = -34;
+    if (c.vel < 0 && c.mesh.position.z < -34) c.mesh.position.z =  34;
+    // Wheels would spin in a real game; skip for perf.
+
+    // ── Collide with player ──
+    const dx = camera.position.x - c.mesh.position.x;
+    const dz = camera.position.z - c.mesh.position.z;
+    const inX = Math.abs(dx) < (c.width / 2 + 0.4);
+    const inZ = Math.abs(dz) < (c.length / 2 + 0.4);
+    if (inX && inZ && !playerState.crackFalling) {
+      playerState.crackFalling = true;     // reusing the "hit recently" debounce
+      damagePlayer(15);
+      showMessage('💥 CAR HIT YOU!', 1200);
+      // Push player out perpendicular to road
+      camera.position.x += Math.sign(dx || 1) * 1.4;
+      setTimeout(() => { playerState.crackFalling = false; }, 700);
+    }
+
+    // ── Collide with the following dog ──
+    if (EARTH.currentDog) {
+      const d = EARTH.currentDog.mesh;
+      const ddx = d.position.x - c.mesh.position.x;
+      const ddz = d.position.z - c.mesh.position.z;
+      if (Math.abs(ddx) < (c.width / 2 + 0.4) && Math.abs(ddz) < (c.length / 2 + 0.4)) {
+        // The dog yelps and bolts back to spawn
+        showMessage('🐕 YELP! THE DOG RAN BACK TO SAFETY!', 1800);
+        EARTH.currentDog.following = false;
+        EARTH.currentDog.mesh.position.set(EARTH.currentDog.mesh.userData.spawnX, 0, EARTH.currentDog.mesh.userData.spawnZ);
+        // Dim its trail again
+        for (const dot of EARTH.currentDog.trailDots) dot.material.opacity = 0.45;
+        EARTH.currentDog = null;
+      }
+    }
+  }
+
+  // ── Try to pick up a dog when player walks within 1.4m of one that isn't following ──
+  if (!EARTH.currentDog) {
+    for (const dog of EARTH.dogs) {
+      if (dog.delivered || dog.following) continue;
+      const dx = dog.mesh.position.x - camera.position.x;
+      const dz = dog.mesh.position.z - camera.position.z;
+      if (dx*dx + dz*dz < 1.4 * 1.4) {
+        dog.following = true;
+        EARTH.currentDog = dog;
+        showMessage(`A DOG FOLLOWS! ITS TRAIL LIGHTS UP. 🐾`, 2200);
+        // Highlight its trail
+        for (const dot of dog.trailDots) dot.material.opacity = 0.95;
+        break;
+      }
+    }
+  }
+
+  // ── Current dog follows player at a small distance ──
+  if (EARTH.currentDog) {
+    const d = EARTH.currentDog.mesh;
+    const dx = camera.position.x - d.position.x;
+    const dz = camera.position.z - d.position.z;
+    const dist = Math.sqrt(dx*dx + dz*dz);
+    if (dist > 1.2) {
+      const sp = 4.5;            // a bit faster than walking pace
+      const nx = dx / dist, nz = dz / dist;
+      d.position.x += nx * sp * dt;
+      d.position.z += nz * sp * dt;
+      d.rotation.y = Math.atan2(nx, nz);
+    }
+    // Bob + tail wag
+    d.position.y = Math.sin(t * 6 + d.userData.bobPhase) * 0.04;
+    if (d.userData.tail) d.userData.tail.rotation.z = Math.sin(t * 12) * 0.7;
+
+    // ── Check if player is on a house's doormat ──
+    for (const h of EARTH.houses) {
+      if (h.doorOpen) continue;
+      const matWorld = new THREE.Vector3();
+      h.doormat.getWorldPosition(matWorld);
+      const pdx = camera.position.x - matWorld.x;
+      const pdz = camera.position.z - matWorld.z;
+      if (Math.abs(pdx) < 0.7 && Math.abs(pdz) < 0.6) {
+        if (h.index === EARTH.currentDog.homeIndex) {
+          deliverDogToHouse(EARTH.currentDog, h);
+        } else {
+          // Wrong house — rate-limited message
+          const now = performance.now();
+          if (!scene.userData.lastWrongHomeMsg || now - scene.userData.lastWrongHomeMsg > 1800) {
+            scene.userData.lastWrongHomeMsg = now;
+            showMessage('THIS ISN\'T HIS HOME…', 1300);
+          }
+        }
+      }
+    }
+  }
+
+  // ── Pulse all visible trail dots ──
+  for (const dog of EARTH.dogs) {
+    if (dog.delivered) continue;
+    const baseOp = dog.following ? 0.85 : 0.35;
+    const k = baseOp + Math.sin(t * 5 + dog.id) * 0.12;
+    for (const dot of dog.trailDots) dot.material.opacity = k;
+  }
+
+  // ── Idle dogs at spawn — gentle bob ──
+  for (const dog of EARTH.dogs) {
+    if (dog.delivered || dog.following) continue;
+    dog.mesh.position.y = Math.sin(t * 3 + dog.mesh.userData.bobPhase) * 0.03;
+    if (dog.mesh.userData.tail) dog.mesh.userData.tail.rotation.z = Math.sin(t * 5 + dog.mesh.userData.bobPhase) * 0.5;
+  }
+
+  // ── Endgame: protagonist's home lights up after all 6 delivered ──
+  if (EARTH.delivered >= 6 && !EARTH.finalPathLit) {
+    EARTH.finalPathLit = true;
+    showMessage('YOUR FAMILY IS WAITING — GO HOME. 🏠', 5000);
+    // Light the porch lamp
+    if (EARTH.protagonistHome && EARTH.protagonistHome.lampHead) {
+      EARTH.protagonistHome.lampHead.material = new THREE.MeshBasicMaterial({ color: 0xffe0a0 });
+      const porchLight = new THREE.PointLight(0xffd080, 2.4, 12, 1.5);
+      porchLight.position.set(EARTH.protagonistHome.x + 1.0, 1.65, EARTH.protagonistHome.z - 0.8);
+      scene.add(porchLight);
+      scene.userData.protagonistPorchLight = porchLight;
+    }
+    // Brighter front window
+    if (EARTH.protagonistHome && EARTH.protagonistHome.window) {
+      EARTH.protagonistHome.window.material.emissiveIntensity = 2.2;
+    }
+  }
+
+  // ── Walking onto the protagonist's doormat ends the game ──
+  if (EARTH.finalPathLit && EARTH.protagonistHome && !transitioning) {
+    const dx = camera.position.x - EARTH.protagonistHome.x + 3.4;   // doormat is at house.x + side*-3.4 = -9 - (-1)*3.4 ... let's just use the doormat world pos
+    const matWorld = new THREE.Vector3();
+    EARTH.protagonistHome.doormat.getWorldPosition(matWorld);
+    const pdx = camera.position.x - matWorld.x;
+    const pdz = camera.position.z - matWorld.z;
+    if (Math.abs(pdx) < 0.9 && Math.abs(pdz) < 0.9) {
+      triggerHomecoming();
+    }
+  }
+}
+
+function deliverDogToHouse(dog, house) {
+  house.doorOpen = true;
+  dog.delivered = true;
+  dog.following = false;
+  EARTH.currentDog = null;
+  // Animate the dog running into the house
+  const startX = dog.mesh.position.x;
+  const startZ = dog.mesh.position.z;
+  const targetX = house.x + house.side * (-1.4);    // just inside the door
+  const targetZ = house.z;
+  const startT = performance.now();
+  const run = () => {
+    const tt = (performance.now() - startT) / 900;
+    if (tt < 1) {
+      dog.mesh.position.x = startX + (targetX - startX) * tt;
+      dog.mesh.position.z = startZ + (targetZ - startZ) * tt;
+      requestAnimationFrame(run);
+    } else {
+      dog.mesh.visible = false;
+    }
+  };
+  requestAnimationFrame(run);
+  // Open the door — swing it inward
+  if (house.doorMesh) {
+    const orig = house.doorMesh.rotation.y;
+    const startT2 = performance.now();
+    const swing = () => {
+      const tt = (performance.now() - startT2) / 600;
+      if (tt < 1) {
+        house.doorMesh.rotation.y = orig - house.side * tt * 1.2;
+        requestAnimationFrame(swing);
+      }
+    };
+    requestAnimationFrame(swing);
+  }
+  // Dim the delivered trail
+  for (const dot of dog.trailDots) dot.material.opacity = 0.0;
+  // Bright glow on the window
+  if (house.window) house.window.material.emissiveIntensity = 1.8;
+  EARTH.delivered++;
+  showMessage(`🏠 HOME! ${EARTH.delivered}/6 DOGS DELIVERED!`, 2200);
+}
+
+function triggerHomecoming() {
+  transitioning = true;
+  document.exitPointerLock();
+  showMessage('HOME. 🏠💛', 4500);
+
+  // Slow the player to a crawl — this is the moment
+  const startT = performance.now();
+  // We don't actually pause the loop; just gate the fade.
+  // Fade to white over ~3 seconds, then victory.
+  const overlay = document.getElementById('transition-overlay');
+  overlay.style.background = '#fff8e0';
+  overlay.style.opacity = '0';
+  overlay.style.transition = 'opacity 2.4s ease-out';
+  setTimeout(() => { overlay.style.opacity = '1'; }, 600);
+  setTimeout(() => {
+    overlay.style.transition = 'opacity 0.8s';      // restore for next time
+    overlay.style.background = '#000';
+    victoryGame();
+  }, 3300);
 }
 
 function buildCatShipHijack() {
@@ -5593,6 +6297,7 @@ function throwAmmo() {
   if (STATE.level === 'jupiter-surface') return throwSpike();
   if (STATE.level === 'cat-ship-hijack') return;   // can't fire during hijack cinematic
   if (STATE.level === 'rocket-interior') return rocketInteract();   // FIRE opens cages
+  if (STATE.level === 'earth') return;             // no weapons on Earth — peaceful homecoming
   if (isSpaceLike(STATE.level)) return throwLaser();
   if (isOceanLike(STATE.level)) return throwDiamond();
   return throwBone();
@@ -7416,7 +8121,11 @@ function victoryGame() {
   const t = document.getElementById('victory-title');
   const s1 = document.getElementById('victory-sub1');
   const s2 = document.getElementById('victory-sub2');
-  if (STATE.level === 'rocket-interior') {
+  if (STATE.level === 'earth') {
+    if (t) t.textContent = 'HOME.';
+    if (s1) s1.textContent = 'EVERY DOG IS WHERE IT BELONGS.';
+    if (s2) s2.textContent = `…the goodest dog in the whole universe • ${STATE.diamonds} 💎`;
+  } else if (STATE.level === 'rocket-interior') {
     if (t) t.textContent = 'EARTH!';
     if (s1) s1.textContent = 'PACK FREED • SOFT LANDING ON HOME SOIL';
     if (s2) s2.textContent = `…the Earth level is coming — get the dogs home • ${STATE.diamonds} 💎`;
@@ -7513,6 +8222,9 @@ function loadNextRoom() {
     ROCKET_INT.target = null; ROCKET_INT.key = null; ROCKET_INT.door = null;
     ROCKET_INT.cages.length = 0; ROCKET_INT.freed = 0;
     ROCKET_INT.phase = 'bomb'; ROCKET_INT.keyHeld = false; ROCKET_INT.doorOpen = false;
+    EARTH.dogs.length = 0; EARTH.houses.length = 0; EARTH.cars.length = 0;
+    EARTH.currentDog = null; EARTH.delivered = 0;
+    EARTH.protagonistHome = null; EARTH.finalPathLit = false;
     clearLevelObstacles();
     scene.userData = {};
     portalActive = false;
@@ -7552,6 +8264,7 @@ function loadNextRoom() {
       'mars-approach':    'MARS APPROACH! LIT MOTHERSHIPS — SHOOT THEIR DARK SPOT! 🔴',
       'mars-surface':     'MARS! EVIL DUST STORMS! POSSESSED ROVERS! RED SPACE LASER! 🔴🤖😾',
       'rocket-interior':  'BOMB THE RED CIRCLE (F KEY) — FREE THE DOGS BEHIND THE DOOR! 💣🔑🐕',
+      'earth':            'HOME! FOLLOW EACH DOG\'S TRAIL TO ITS HOUSE — WATCH FOR CARS! 🐕🏠🚗',
       'dungeon':          `ROOM ${currentRoom} — SPOOKIER IN HERE...`,
     };
     showMessage(intro[STATE.level] || '', 3500);
@@ -8545,6 +9258,11 @@ function rebuildLevel(fromBeginning) {
   ROCKET_INT.target = null; ROCKET_INT.key = null; ROCKET_INT.door = null;
   ROCKET_INT.cages.length = 0; ROCKET_INT.freed = 0;
   ROCKET_INT.phase = 'bomb'; ROCKET_INT.keyHeld = false; ROCKET_INT.doorOpen = false;
+  EARTH.dogs.length = 0; EARTH.houses.length = 0; EARTH.cars.length = 0;
+  EARTH.currentDog = null; EARTH.delivered = 0;
+  EARTH.protagonistHome = null; EARTH.finalPathLit = false;
+  // Fresh-game restart clears the freed-dog roster too
+  if (fromBeginning) STATE.freedDogColors = [];
   clearLevelObstacles();
 
   scene.userData = {};
@@ -8744,6 +9462,14 @@ function buildLevel(level) {
     setSpacesuitVisor(false);
     if (STATE.missiles < 6) STATE.missiles = 6;
     buildRocketInterior();
+  } else if (level === 'earth') {
+    scene.fog = new THREE.FogExp2(0x6090b8, 0.015);
+    renderer.setClearColor(0x6080a0);
+    camera.position.set(0, PLAYER_HEIGHT, 25);
+    playerYaw = Math.PI;
+    swapHeldToBone();    // no combat — held bone is just a friendly visual
+    setSpacesuitVisor(false);
+    buildEarth();
   }
 }
 
@@ -8780,6 +9506,7 @@ const DEV_ROOMS = [
   { room: 16, label: 'Room 16 — Mars Approach (Motherships)' },
   { room: 17, label: 'Room 17 — Mars Surface (Rovers + Earth Rocket)' },
   { room: 18, label: 'Room 18 — Rocket Interior (Bomb + Free Dogs)' },
+  { room: 19, label: 'Room 19 — Earth (Homecoming)' },
 ];
 
 function toggleDevMenu() {
@@ -8831,9 +9558,10 @@ const WAVES_PER_ROOM = 3; // clear 3 waves to unlock the door
 
 function updateSpawner(dt) {
   if (STATE.gameover || roomCleared) return;
-  // Scripted-cinematic levels — no wave spawns
+  // Scripted-cinematic / non-combat levels — no wave spawns
   if (STATE.level === 'cat-ship-hijack') return;
   if (STATE.level === 'rocket-interior') return;
+  if (STATE.level === 'earth') return;
   // Neptune is a one-and-done boss fight: spawn the boss exactly once
   if (STATE.level === 'neptune-approach') {
     if (waveNumber === 0) {
@@ -8991,6 +9719,7 @@ function loop() {
   updateJupiterStorm(dt);
   updateMarsStorm(dt);
   updateRocketInterior(dt);
+  updateEarth(dt);
   updateCatShipHijack(dt);
   updateParticles(dt);
   updateExplosions(dt);
