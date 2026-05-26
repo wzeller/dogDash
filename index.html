@@ -377,7 +377,10 @@
       </div>
     </div>
     <div id="room-display" style="position:absolute; top:14px; left:50%; transform:translateX(-50%); color:#c8a87a; font-size:13px; letter-spacing:3px; text-shadow:0 0 8px #c8a87a;"><span id="room-prefix">ROOM </span><span id="room-num">1</span></div>
+    <div id="objective-hint" style="position:absolute; top:38px; left:50%; transform:translateX(-50%); color:#fff0c8; font-family:'Courier New',monospace; font-size:13px; letter-spacing:2px; text-shadow:0 0 10px rgba(0,0,0,0.85); background:rgba(0,0,0,0.35); padding:4px 12px; border-radius:4px; display:none; pointer-events:none;"></div>
+    <div id="wave-counter" style="position:absolute; top:14px; left:14px; color:#ff6b35; font-family:'Courier New',monospace; font-size:13px; letter-spacing:3px; text-shadow:0 0 8px #ff6b35; display:none;">WAVE 1/3</div>
     <div id="message"></div>
+    <button id="pause-btn" type="button" style="position:absolute; top:12px; right:60px; width:38px; height:38px; border-radius:8px; background:rgba(0,0,0,0.4); border:2px solid #c8a87a; color:#e8d5a3; font-family:'Courier New',monospace; font-size:16px; cursor:pointer; pointer-events:auto;">⏸</button>
   </div>
 
   <!-- Hit vignette — bright green edge flash on boss weak-point hit -->
@@ -407,6 +410,35 @@
   <!-- Click-to-play hint shown when pointer isn't locked -->
   <div id="play-hint" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); padding:18px 28px; background:rgba(0,0,0,0.72); border:2px solid #ff6b35; box-shadow:0 0 24px #ff6b35; color:#ff6b35; font-family:'Courier New',monospace; font-size:16px; letter-spacing:3px; text-shadow:0 0 8px #ff6b35; z-index:80; pointer-events:none; align-items:center; justify-content:center; text-align:center;">
     CLICK TO PLAY<br><span style="font-size:11px; color:#888; letter-spacing:2px;">esc to release cursor &nbsp;•&nbsp; ` for dev menu</span>
+  </div>
+
+  <!-- Pause menu (Esc / P / ⏸ button) -->
+  <div id="pause-menu" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.78); flex-direction:column; align-items:center; justify-content:center; z-index:300; color:#e8d5a3; font-family:'Courier New',monospace;">
+    <div style="font-size:48px; color:#ff6b35; text-shadow:0 0 30px #ff6b35; letter-spacing:8px; margin-bottom:30px; animation:flicker 3s infinite;">PAUSED</div>
+    <button id="pause-resume" type="button" style="padding:14px 60px; margin:8px 0; background:transparent; border:2px solid #ff6b35; color:#ff6b35; font-family:inherit; font-size:18px; letter-spacing:4px; cursor:pointer; text-shadow:0 0 8px #ff6b35; box-shadow:0 0 14px #ff6b35; min-width:280px;">▶ RESUME</button>
+    <button id="pause-settings" type="button" style="padding:14px 60px; margin:8px 0; background:transparent; border:2px solid #c8a87a; color:#c8a87a; font-family:inherit; font-size:18px; letter-spacing:4px; cursor:pointer; min-width:280px;">⚙ SETTINGS</button>
+    <button id="pause-restart-level" type="button" style="padding:14px 60px; margin:8px 0; background:transparent; border:2px solid #c8a87a; color:#c8a87a; font-family:inherit; font-size:18px; letter-spacing:4px; cursor:pointer; min-width:280px;">↻ RESTART LEVEL</button>
+    <button id="pause-restart-game" type="button" style="padding:14px 60px; margin:8px 0; background:transparent; border:2px solid #c8a87a; color:#c8a87a; font-family:inherit; font-size:18px; letter-spacing:4px; cursor:pointer; min-width:280px;">⏏ RESTART GAME</button>
+    <div style="margin-top:18px; font-size:11px; color:#666; letter-spacing:2px;">PRESS <span style="color:#e8d5a3;">P</span> OR <span style="color:#e8d5a3;">ESC</span> TO RESUME</div>
+
+    <!-- Inline settings panel — toggled by the SETTINGS button -->
+    <div id="settings-panel" style="display:none; margin-top:24px; padding:16px 22px; border:1px solid #555; background:rgba(0,0,0,0.5); min-width:340px;">
+      <div style="font-size:14px; letter-spacing:4px; color:#ff6b35; margin-bottom:14px; text-align:center;">SETTINGS</div>
+      <label style="display:flex; align-items:center; justify-content:space-between; font-size:12px; letter-spacing:2px; margin:8px 0;">
+        <span>SENSITIVITY</span>
+        <input id="set-sens" type="range" min="5" max="40" step="1" style="width:160px;">
+        <span id="set-sens-val" style="width:36px; text-align:right; color:#c8a87a;">20</span>
+      </label>
+      <label style="display:flex; align-items:center; justify-content:space-between; font-size:12px; letter-spacing:2px; margin:8px 0;">
+        <span>VOLUME</span>
+        <input id="set-vol" type="range" min="0" max="100" step="1" style="width:160px;">
+        <span id="set-vol-val" style="width:36px; text-align:right; color:#c8a87a;">35</span>
+      </label>
+      <label style="display:flex; align-items:center; justify-content:space-between; font-size:12px; letter-spacing:2px; margin:8px 0;">
+        <span>MUTE</span>
+        <input id="set-mute" type="checkbox" style="transform:scale(1.4); margin-left:auto;">
+      </label>
+    </div>
   </div>
 
   <!-- Dev secret level-warp menu (toggle with backtick `) -->

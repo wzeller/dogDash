@@ -45,6 +45,8 @@ const STATE = {
   difficulty: 'normal',
   level: 'dungeon',   // 'dungeon' | 'ocean-*' | 'space-*'
   freedDogColors: [],  // remembered fur colors of each cage dog freed in rocket-interior; spawned on Earth
+  paused: false,
+  sensitivity: parseFloat(localStorage.getItem('dd_sens')) || 0.002,
 };
 const DUNGEON_ROOMS = 3;       // rooms 1..3 are dungeon
 const OCEAN_LEVELS = ['ocean-surface', 'ocean-underwater', 'pirate-ship']; // rooms 4..6
@@ -175,6 +177,93 @@ function isTouchDevice() {
   const hasTouchPoints = (navigator.maxTouchPoints || 0) > 0;
   const coarsePrimary = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
   return hasTouchPoints && coarsePrimary;
+}
+
+// ─── Pause / Resume ─────────────────────────────────────────────────────────
+function pauseGame() {
+  if (!STATE.started || STATE.gameover || STATE.paused || transitioning) return;
+  STATE.paused = true;
+  try { document.exitPointerLock(); } catch (e) {}
+  TOUCH.moveX = 0; TOUCH.moveZ = 0; TOUCH.lookX = 0; TOUCH.lookY = 0;
+  // Stop any auto-fire intervals that the touch FIRE button might be running
+  // (they self-check STATE.gameover but not STATE.paused — easiest to just
+  // hide the touch UI here so no button is held).
+  const tui = document.getElementById('touch-ui');
+  if (tui && TOUCH.active) tui.dataset.wasShown = '1';
+  if (tui && TOUCH.active) tui.style.display = 'none';
+  const pm = document.getElementById('pause-menu');
+  if (pm) pm.style.display = 'flex';
+}
+function resumeGame() {
+  if (!STATE.paused) return;
+  STATE.paused = false;
+  const pm = document.getElementById('pause-menu');
+  if (pm) pm.style.display = 'none';
+  const sp = document.getElementById('settings-panel');
+  if (sp) sp.style.display = 'none';
+  const tui = document.getElementById('touch-ui');
+  if (tui && tui.dataset.wasShown === '1') {
+    tui.style.display = 'block';
+    delete tui.dataset.wasShown;
+  }
+  // Re-engage pointer lock on desktop (we're inside a click event, valid gesture)
+  if (!isTouchDevice()) lockPointer();
+}
+
+function initPauseMenu() {
+  // Buttons
+  const bindBtn = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', (e) => { e.preventDefault(); fn(); });
+  };
+  bindBtn('pause-resume', resumeGame);
+  bindBtn('pause-restart-level', () => { resumeGame(); restartLevel(); });
+  bindBtn('pause-restart-game',  () => { resumeGame(); restartGame(); });
+  bindBtn('pause-settings', () => {
+    const sp = document.getElementById('settings-panel');
+    if (sp) sp.style.display = (sp.style.display === 'block') ? 'none' : 'block';
+  });
+  // The HUD pause button
+  const pauseBtn = document.getElementById('pause-btn');
+  if (pauseBtn) {
+    const doPause = (e) => { e.preventDefault(); e.stopPropagation(); pauseGame(); };
+    pauseBtn.addEventListener('click', doPause);
+    pauseBtn.addEventListener('touchstart', doPause, { passive: false });
+  }
+  // Settings sliders
+  const sens = document.getElementById('set-sens');
+  const sensVal = document.getElementById('set-sens-val');
+  if (sens) {
+    const initVal = Math.round((STATE.sensitivity || 0.002) * 10000);  // 0.002 → 20
+    sens.value = initVal; if (sensVal) sensVal.textContent = initVal;
+    sens.addEventListener('input', () => {
+      const v = parseInt(sens.value, 10);
+      STATE.sensitivity = v / 10000;
+      localStorage.setItem('dd_sens', String(STATE.sensitivity));
+      if (sensVal) sensVal.textContent = v;
+    });
+  }
+  const vol = document.getElementById('set-vol');
+  const volVal = document.getElementById('set-vol-val');
+  if (vol) {
+    const initVal = Math.round((AUDIO.master ? AUDIO.master.gain.value : 0.35) * 100);
+    vol.value = initVal; if (volVal) volVal.textContent = initVal;
+    vol.addEventListener('input', () => {
+      const v = parseInt(vol.value, 10);
+      const g = v / 100;
+      if (AUDIO.master) AUDIO.master.gain.value = g;
+      localStorage.setItem('dd_vol', String(g));
+      if (volVal) volVal.textContent = v;
+    });
+  }
+  const mute = document.getElementById('set-mute');
+  if (mute) {
+    mute.checked = AUDIO.muted;
+    mute.addEventListener('change', () => {
+      AUDIO.muted = mute.checked;
+      localStorage.setItem('dd_mute', AUDIO.muted ? '1' : '0');
+    });
+  }
 }
 
 // Wrapper used everywhere instead of canvas.requestPointerLock() directly.
@@ -369,8 +458,10 @@ function initAudio() {
   try {
     AUDIO.ctx = new (window.AudioContext || window.webkitAudioContext)();
     AUDIO.master = AUDIO.ctx.createGain();
-    AUDIO.master.gain.value = 0.35;
+    const savedVol = parseFloat(localStorage.getItem('dd_vol'));
+    AUDIO.master.gain.value = isNaN(savedVol) ? 0.35 : savedVol;
     AUDIO.master.connect(AUDIO.ctx.destination);
+    AUDIO.muted = localStorage.getItem('dd_mute') === '1';
   } catch (e) { /* browser without WebAudio — silent */ }
 }
 
@@ -424,6 +515,107 @@ function playSound(kind) {
 // after the bounds clamp. isActive() lets things toggle (e.g. doors that open).
 const LEVEL_OBSTACLES = [];
 function clearLevelObstacles() { LEVEL_OBSTACLES.length = 0; }
+
+// ─── Objective hint + wave counter ──────────────────────────────────────────
+function objectiveText() {
+  const lvl = STATE.level;
+  if (lvl === 'dungeon') {
+    if (roomCleared) return 'WALK THROUGH THE DOOR →';
+    return `CLEAR ${WAVES_PER_ROOM - waveNumber} WAVE${WAVES_PER_ROOM - waveNumber !== 1 ? 'S' : ''} OF CATS`;
+  }
+  if (lvl === 'ocean-surface') {
+    if (portalActive) return 'BOARD THE BOAT, STEP INTO THE PORTAL';
+    return `DEFEAT ${WAVES_PER_ROOM - waveNumber} WAVE${WAVES_PER_ROOM - waveNumber !== 1 ? 'S' : ''} OF SHARKS`;
+  }
+  if (lvl === 'ocean-underwater') {
+    if (portalActive) return 'SWIM TO THE GLOWING PORTAL';
+    return `SURVIVE ${WAVES_PER_ROOM - waveNumber} SHARK WAVE${WAVES_PER_ROOM - waveNumber !== 1 ? 'S' : ''}`;
+  }
+  if (lvl === 'pirate-ship') {
+    if (portalActive) return 'WALK TO THE BOW PORTAL';
+    return `FIGHT ${WAVES_PER_ROOM - waveNumber} WAVE${WAVES_PER_ROOM - waveNumber !== 1 ? 'S' : ''} OF PIRATES`;
+  }
+  if (lvl === 'space-cockpit') {
+    if (roomCleared) return 'BRACE — PLUTO CRASH INCOMING';
+    return 'SHOOT THE ALIEN SHIPS';
+  }
+  if (lvl === 'pluto-surface') {
+    return scene.userData && scene.userData.rocket ? 'BOARD THE ROCKET →' : 'DEFEAT THE MARTIANS — WATCH THE CRACKS';
+  }
+  if (lvl === 'neptune-approach') return 'SHOOT THE RED CORE OF THE MOTHERSHIP';
+  if (lvl === 'neptune-surface') {
+    return portalActive ? 'WALK INTO THE JUPITER PORTAL' : 'THROW DIRT AT THE VACUUMS';
+  }
+  if (lvl === 'uranus-surface') {
+    return scene.userData && scene.userData.rocket ? 'BOARD THE ROCKET →' : 'BLAST THE GRAY ALIENS';
+  }
+  if (lvl === 'saturn-approach') {
+    if (roomCleared) return 'BRACE — SATURN CRASH INCOMING';
+    return 'BLAST THE FIGHTERS — F = MISSILE';
+  }
+  if (lvl === 'saturn-surface') {
+    return portalActive ? 'STEP INTO THE JUPITER PORTAL' : 'NAIL THE WATER-GUN ALIENS';
+  }
+  if (lvl === 'jupiter-surface') {
+    return JUPITER_DIG.active ? 'WALK INTO THE DIG SITE →' : 'POP THE TENNIS BALLS WITH SPIKES';
+  }
+  if (lvl === 'cat-ship-hijack') return 'HOLD ON — HIJACK IN PROGRESS';
+  if (lvl === 'mars-approach') {
+    if (roomCleared) return 'BRACE — MARS LANDING INCOMING';
+    return 'AIM FOR THE DARK SPOT ON EACH MOTHERSHIP';
+  }
+  if (lvl === 'mars-surface') {
+    return MARS_EARTH_ROCKET.active ? 'BOARD THE EARTH ROCKET →' : 'BLAST THE POSSESSED ROVERS';
+  }
+  if (lvl === 'rocket-interior') {
+    const p = ROCKET_INT.phase;
+    if (p === 'bomb')      return 'BOMB THE RED CIRCLE (F KEY)';
+    if (p === 'fetch-key') return 'GRAB THE GOLDEN KEY';
+    if (p === 'door')      return 'WALK TO THE DOOR';
+    if (p === 'kennel')    return `FREE THE DOGS (${ROCKET_INT.freed}/${ROCKET_INT.cages.length}) — CLICK/FIRE NEAR EACH CAGE`;
+    return '';
+  }
+  if (lvl === 'earth') {
+    if (EARTH.delivered >= 6) return 'WALK HOME →';
+    if (EARTH.currentDog)     return `TAKE THIS DOG HOME (${EARTH.delivered}/6 DELIVERED)`;
+    return `WALK TO A DOG, FOLLOW ITS TRAIL (${EARTH.delivered}/6 DELIVERED)`;
+  }
+  return '';
+}
+
+function updateObjective() {
+  const el = document.getElementById('objective-hint');
+  if (!el) return;
+  if (!STATE.started || STATE.gameover) { el.style.display = 'none'; return; }
+  const txt = objectiveText();
+  if (!txt) { el.style.display = 'none'; return; }
+  if (el.textContent !== txt) el.textContent = txt;
+  el.style.display = 'block';
+}
+
+const WAVE_LEVELS = new Set([
+  'dungeon', 'ocean-surface', 'ocean-underwater', 'pirate-ship',
+  'space-cockpit', 'pluto-surface', 'neptune-surface', 'uranus-surface',
+  'saturn-approach', 'saturn-surface', 'jupiter-surface',
+  'mars-approach', 'mars-surface',
+]);
+
+function updateWaveCounter() {
+  const el = document.getElementById('wave-counter');
+  if (!el) return;
+  if (!STATE.started || STATE.gameover || !WAVE_LEVELS.has(STATE.level) || roomCleared) {
+    el.style.display = 'none';
+    return;
+  }
+  const remaining = ENEMIES.length;
+  // Show current-wave number (1-indexed) — if 0 waves spawned yet, show "PREP"
+  const wn = Math.max(1, waveNumber);
+  const txt = waveNumber === 0
+    ? `WAVE 1/${WAVES_PER_ROOM} INCOMING…`
+    : `WAVE ${wn}/${WAVES_PER_ROOM} • ${remaining} LEFT`;
+  if (el.textContent !== txt) el.textContent = txt;
+  el.style.display = 'block';
+}
 
 // ─── Off-screen enemy markers ────────────────────────────────────────────────
 // Per-frame, projects every enemy to screen space and pins a red arrow at the
@@ -553,7 +745,19 @@ function init() {
     initAudio();   // any keypress is a user gesture — safe place to bring audio up
     if (e.code === 'KeyM') {
       AUDIO.muted = !AUDIO.muted;
+      localStorage.setItem('dd_mute', AUDIO.muted ? '1' : '0');
+      const mc = document.getElementById('set-mute'); if (mc) mc.checked = AUDIO.muted;
       showMessage(AUDIO.muted ? '🔇 MUTED' : '🔊 SOUND ON', 1000);
+      return;
+    }
+    if (e.code === 'KeyP') {
+      e.preventDefault();
+      if (STATE.paused) resumeGame(); else pauseGame();
+      return;
+    }
+    if (e.code === 'Escape' && STATE.paused) {
+      e.preventDefault();
+      resumeGame();
       return;
     }
     if (e.code === 'Backquote') {
@@ -578,10 +782,14 @@ function init() {
     if (isTouchDevice()) return;     // touch devices stay "locked" via TOUCH.active
     MOUSE.locked = document.pointerLockElement === canvas;
     if (MOUSE.locked) hidePlayHint();
-    else if (STATE.started && !STATE.gameover) showPlayHint();
+    else if (STATE.started && !STATE.gameover && !STATE.paused) {
+      // Esc was hit mid-game — that's our pause signal
+      pauseGame();
+    }
   });
 
   initTouchControls();
+  initPauseMenu();
 }
 
 function onResize() {
@@ -7063,8 +7271,8 @@ function updatePlayer(dt) {
     MOUSE.dy += curve(tly) * TOUCH_LOOK_RATE_Y * dt;
   }
 
-  // Mouse look
-  const sensitivity = 0.002;
+  // Mouse look — sensitivity is tunable in pause-menu settings (persisted to localStorage)
+  const sensitivity = STATE.sensitivity || 0.002;
   playerYaw   -= MOUSE.dx * sensitivity;
   playerPitch -= MOUSE.dy * sensitivity;
   playerPitch  = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, playerPitch));
@@ -10025,10 +10233,10 @@ function loop() {
 
   const dt = Math.min(clock.getDelta(), 0.05);
 
-  // After death, freeze the simulation entirely. Without this guard, enemies
-  // kept moving and the touch joystick kept driving the camera around behind
-  // the game-over screen — making the death feel "ignored" on mobile.
-  if (STATE.gameover) {
+  // Freeze the simulation entirely on game-over OR pause. Without this guard
+  // input keeps driving the camera and enemies keep attacking behind the
+  // overlay, which makes the moment feel "ignored".
+  if (STATE.gameover || STATE.paused) {
     renderer.render(scene, camera);
     return;
   }
@@ -10065,6 +10273,8 @@ function loop() {
   updateSpaceProgress(dt);
   updateSpawner(dt);
   updateEnemyMarkers();
+  updateObjective();
+  updateWaveCounter();
   checkDoorTransition();
 
   renderer.render(scene, camera);
