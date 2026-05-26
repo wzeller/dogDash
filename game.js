@@ -38,6 +38,7 @@ const STATE = {
   missiles: 0,
   dirt: 0,
   nails: 0,
+  spikes: 0,
   running: false,
   started: false,
   gameover: false,
@@ -3406,7 +3407,213 @@ function spawnTennisBall(x, z) {
   return t;
 }
 
-// ─── Bite weapon (Jupiter surface) ───────────────────────────────────────────
+// ─── Spike launcher (Jupiter surface) ────────────────────────────────────────
+const spikeShaftMat = persistMat(new THREE.MeshStandardMaterial({
+  color: 0xa8aab2, metalness: 0.8, roughness: 0.3,
+  emissive: 0x303038, emissiveIntensity: 0.25,
+}));
+const spikeTipMat = persistMat(new THREE.MeshStandardMaterial({
+  color: 0xff5028, metalness: 0.5, roughness: 0.35,
+  emissive: 0x802010, emissiveIntensity: 0.7,
+}));
+
+function makeSpikeMesh(forFlight = false) {
+  const s = forFlight ? 2.0 : 1.0;
+  const spike = new THREE.Group();
+  // Long shaft
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.04 * s, 0.04 * s, 0.55 * s, 8),
+    spikeShaftMat
+  );
+  shaft.rotation.x = Math.PI / 2;
+  spike.add(shaft);
+  // Barbed conical tip (red-hot)
+  const tip = new THREE.Mesh(
+    new THREE.ConeGeometry(0.06 * s, 0.16 * s, 8),
+    spikeTipMat
+  );
+  tip.rotation.x = -Math.PI / 2;
+  tip.position.z = 0.35 * s;
+  spike.add(tip);
+  // Three small barbs near the tip
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2;
+    const barb = new THREE.Mesh(
+      new THREE.ConeGeometry(0.025 * s, 0.08 * s, 4),
+      spikeShaftMat
+    );
+    barb.position.set(Math.cos(a) * 0.05 * s, Math.sin(a) * 0.05 * s, 0.22 * s);
+    // Splayed outward
+    barb.rotation.x = -Math.PI / 2 - 0.5;
+    barb.rotation.z = a;
+    spike.add(barb);
+  }
+  // Fletching at the back (X cross)
+  for (let i = 0; i < 2; i++) {
+    const fletch = new THREE.Mesh(
+      new THREE.BoxGeometry(0.18 * s, 0.005, 0.1 * s),
+      new THREE.MeshStandardMaterial({ color: 0x402010, roughness: 0.9 })
+    );
+    fletch.position.z = -0.25 * s;
+    fletch.rotation.z = (i * Math.PI) / 2;
+    spike.add(fletch);
+  }
+
+  if (forFlight) {
+    // Glowing tracer ball at the tip
+    const tracer = new THREE.Mesh(
+      new THREE.SphereGeometry(0.10, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xffd060 })
+    );
+    tracer.position.z = 0.5;
+    spike.add(tracer);
+    // Faint orange exhaust streak behind
+    const streak = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.03, 0.005, 0.6, 8),
+      new THREE.MeshBasicMaterial({ color: 0xff6020, transparent: true, opacity: 0.8 })
+    );
+    streak.rotation.x = Math.PI / 2;
+    streak.position.z = -0.5;
+    spike.add(streak);
+    // Point light for night-storm visibility
+    const pl = new THREE.PointLight(0xffa040, 1.6, 5, 2);
+    pl.position.z = 0.2;
+    spike.add(pl);
+  }
+  return spike;
+}
+
+function throwSpike() {
+  if (STATE.spikes <= 0 || STATE.gameover) return;
+  STATE.spikes--;
+  updateHUD();
+
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+
+  const spike = makeSpikeMesh(true);
+  spike.position.copy(camera.position).addScaledVector(dir, 0.55);
+  const up = new THREE.Vector3(0, 0, 1);
+  spike.quaternion.setFromUnitVectors(up, dir.clone().normalize());
+  spike.userData.velocity = dir.clone().multiplyScalar(48);
+  spike.userData.lifetime = 1.8;
+  spike.userData.damage = 55;
+  spike.userData.isSpike = true;
+  spike.userData.isNail = true;            // share fast-projectile pipeline (straight, segment-sphere)
+  scene.add(spike);
+  PROJECTILES.push(spike);
+
+  // Muzzle flash on the spike-gun tip
+  if (dogBoneHeld && dogBoneHeld.userData && dogBoneHeld.userData.muzzle) {
+    const muz = dogBoneHeld.userData.muzzle;
+    const orig = muz.material.color.getHex();
+    muz.material.color.setHex(0xffffff);
+    setTimeout(() => muz.material.color.setHex(orig), 70);
+  }
+  animateThrow();
+}
+
+function swapHeldToSpikeGun() {
+  if (!dogArm || !dogBoneHeld) return;
+  dogArm.remove(dogBoneHeld);
+  const gun = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x9a4020, metalness: 0.7, roughness: 0.3 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x201810, metalness: 0.85, roughness: 0.3 });
+  // Bulky receiver
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.14, 0.38), bodyMat);
+  body.position.set(0, 0.04, -0.05);
+  gun.add(body);
+  // Twin barrels
+  for (const sx of [-0.04, 0.04]) {
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.26, 10), trimMat);
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(sx, 0.05, -0.28);
+    gun.add(barrel);
+  }
+  // Glowing muzzle (orange hot — Jovian)
+  const muzzle = new THREE.Mesh(
+    new THREE.SphereGeometry(0.05, 8, 6),
+    new THREE.MeshBasicMaterial({ color: 0xff8030 })
+  );
+  muzzle.position.set(0, 0.05, -0.42);
+  gun.add(muzzle);
+  // Drum magazine slung underneath
+  const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.09, 14), trimMat);
+  drum.rotation.x = Math.PI / 2;
+  drum.position.set(0, -0.07, 0.0);
+  gun.add(drum);
+  // Visible spike heads peeking from the top of the receiver
+  for (let i = 0; i < 3; i++) {
+    const head = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.06, 6), spikeTipMat);
+    head.position.set(-0.04 + i * 0.04, 0.13, -0.05);
+    gun.add(head);
+  }
+  // Grip
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.16, 0.06), trimMat);
+  grip.position.set(0, -0.07, 0.12);
+  gun.add(grip);
+  gun.userData.muzzle = muzzle;
+
+  gun.position.set(0.05, -0.08, 0);
+  dogArm.add(gun);
+  dogBoneHeld = gun;
+}
+
+// Ground-placed spike pack pickups
+const SPIKE_PICKUPS = [];
+function spawnGroundSpikePacks(count) {
+  for (let i = 0; i < count; i++) {
+    const g = new THREE.Group();
+    // Wooden quiver with several spikes sticking out
+    const box = new THREE.Mesh(
+      new THREE.BoxGeometry(0.32, 0.5, 0.32),
+      new THREE.MeshStandardMaterial({ color: 0x4a2a14, roughness: 0.85 })
+    );
+    box.position.y = 0.25;
+    g.add(box);
+    // Cluster of spikes poking out the top
+    for (let k = 0; k < 5; k++) {
+      const sp = makeSpikeMesh(false);
+      sp.scale.setScalar(0.85);
+      sp.rotation.z = Math.PI / 2;
+      sp.rotation.y = (k - 2) * 0.18;
+      sp.position.set((Math.random() - 0.5) * 0.15, 0.55 + Math.random() * 0.1, (Math.random() - 0.5) * 0.15);
+      g.add(sp);
+    }
+    // Warm orange glow so it's spottable in the storm
+    const glow = new THREE.PointLight(0xff7030, 1.4, 4, 2);
+    glow.position.y = 0.55;
+    g.add(glow);
+    let px, pz;
+    do {
+      px = (Math.random() - 0.5) * 42;
+      pz = (Math.random() - 0.5) * 42;
+    } while (px*px + pz*pz < 8);
+    g.position.set(px, 0, pz);
+    g.userData.rotOffset = Math.random() * Math.PI * 2;
+    scene.add(g);
+    SPIKE_PICKUPS.push(g);
+  }
+}
+
+function updateSpikePickups(dt) {
+  for (let i = SPIKE_PICKUPS.length - 1; i >= 0; i--) {
+    const d = SPIKE_PICKUPS[i];
+    d.rotation.y += dt * 0.35;
+    const dx = d.position.x - camera.position.x;
+    const dz = d.position.z - camera.position.z;
+    if (Math.sqrt(dx*dx + dz*dz) < 1.1) {
+      const grab = 10;
+      STATE.spikes = Math.min(STATE.spikes + grab, 60);
+      updateHUD();
+      showMessage(`+${grab} SPIKES!`, 1100);
+      scene.remove(d);
+      SPIKE_PICKUPS.splice(i, 1);
+    }
+  }
+}
+
+// ─── Bite weapon (legacy — kept for reference, no longer called) ─────────────
 function biteAttack() {
   if (STATE.gameover) return;
   // Find nearest enemy in front of player, within bite range.
@@ -4281,7 +4488,7 @@ function swapHeldToBone() {
 function throwAmmo() {
   if (STATE.level === 'neptune-surface') return throwDirt();
   if (STATE.level === 'saturn-surface') return throwNail();
-  if (STATE.level === 'jupiter-surface') return biteAttack();
+  if (STATE.level === 'jupiter-surface') return throwSpike();
   if (STATE.level === 'cat-ship-hijack') return;   // can't fire during hijack cinematic
   if (isSpaceLike(STATE.level)) return throwLaser();
   if (isOceanLike(STATE.level)) return throwDiamond();
@@ -6068,6 +6275,7 @@ function loadNextRoom() {
     SPACE_PICKUPS.length = 0;
     DIRT_PICKUPS.length = 0;
     NAIL_PICKUPS.length = 0;
+    SPIKE_PICKUPS.length = 0;
     PLUTO_CRACKS.length = 0;
     JUPITER_DIG.mesh = null; JUPITER_DIG.active = false;
     scene.userData = {};
@@ -6079,6 +6287,7 @@ function loadNextRoom() {
     if (isSpaceLike(STATE.level) && STATE.lasers === 0) STATE.lasers = 24;
     if (STATE.level === 'neptune-surface' && STATE.dirt === 0) STATE.dirt = 18;
     if (STATE.level === 'saturn-surface' && STATE.nails === 0) STATE.nails = 30;
+    if (STATE.level === 'jupiter-surface' && STATE.spikes === 0) STATE.spikes = 36;
 
     playerYaw = Math.PI;
     playerVelocityY = 0;
@@ -6102,7 +6311,7 @@ function loadNextRoom() {
       'uranus-surface':   'URANUS! YOU WERE KIDNAPPED — FIGHT THE GRAY ALIENS! 👽⚡',
       'saturn-approach':  'INTO SATURN\'S RINGS! TIE FIGHTERS! F = MISSILE 🚀⚔️',
       'saturn-surface':   'SATURN STORM! WATER-GUN ALIENS! NAILGUN AT THE READY! 🔨💧',
-      'jupiter-surface':  'JUPITER STORM! CHASE THE TENNIS BALLS — BITE TO DESTROY! 🎾🦷',
+      'jupiter-surface':  'JUPITER STORM! SPIKE-LAUNCH THE TENNIS BALLS! 🎾🗡️',
       'cat-ship-hijack':  'TRAPPED IN A CAT SHIP CAGE… 😾',
       'dungeon':          `ROOM ${currentRoom} — SPOOKIER IN HERE...`,
     };
@@ -6772,21 +6981,25 @@ function updateHUD() {
   if (misEl) misEl.textContent = STATE.missiles;
   const nailEl = document.getElementById('nail-count');
   if (nailEl) nailEl.textContent = STATE.nails;
+  const spikeEl = document.getElementById('spike-count');
+  if (spikeEl) spikeEl.textContent = STATE.spikes;
   const inOcean = isOceanLike(STATE.level);
   const inSpace = isSpaceLike(STATE.level);
   const isDirtLevel  = STATE.level === 'neptune-surface';
   const isLaserLevel = inSpace && !isDirtLevel;
   const isMissileLevel = STATE.level === 'saturn-approach';
   const isNailLevel    = STATE.level === 'saturn-surface';
+  const isSpikeLevel   = STATE.level === 'jupiter-surface';
   document.getElementById('bones-display').style.display    = (!inOcean && !inSpace) ? 'block' : 'none';
   const dd = document.getElementById('diamonds-display'); if (dd) dd.style.display = inOcean ? 'block' : 'none';
-  const ld = document.getElementById('lasers-display');   if (ld) ld.style.display = (isLaserLevel && !isNailLevel) ? 'block' : 'none';
+  const ld = document.getElementById('lasers-display');   if (ld) ld.style.display = (isLaserLevel && !isNailLevel && !isSpikeLevel) ? 'block' : 'none';
   const dr = document.getElementById('dirt-display');     if (dr) dr.style.display = isDirtLevel ? 'block' : 'none';
   const mi = document.getElementById('missiles-display'); if (mi) mi.style.display = isMissileLevel ? 'block' : 'none';
   // Touch missile button: only when on a missile level AND there's at least one missile loaded
   const touchMis = document.getElementById('touch-missile');
   if (touchMis) touchMis.style.display = (TOUCH.active && isMissileLevel && STATE.missiles > 0) ? 'block' : 'none';
   const na = document.getElementById('nails-display');    if (na) na.style.display = isNailLevel ? 'block' : 'none';
+  const sp = document.getElementById('spikes-display');   if (sp) sp.style.display = isSpikeLevel ? 'block' : 'none';
   const prefix = document.getElementById('room-prefix');
   if (prefix) prefix.style.display = STATE.level === 'dungeon' ? 'inline' : 'none';
   drawDogFace(STATE.health);
@@ -6985,11 +7198,12 @@ function rebuildLevel(fromBeginning) {
 
   const inOcean = isOceanLike(STATE.level);
   const inSpace = isSpaceLike(STATE.level);
-  if (STATE.level === 'neptune-surface') { STATE.dirt = 18; STATE.lasers = 0; STATE.bones = 30; STATE.diamonds = 0; STATE.nails = 0; }
-  else if (STATE.level === 'saturn-surface') { STATE.nails = 30; STATE.lasers = 0; STATE.bones = 30; STATE.diamonds = 0; STATE.dirt = 0; }
-  else if (inSpace)                       { STATE.lasers = 24; STATE.bones = 30; STATE.diamonds = 0; STATE.dirt = 0; STATE.nails = 0; }
-  else if (inOcean)                       { STATE.diamonds = 12; STATE.bones = 30; STATE.lasers = 0; STATE.dirt = 0; STATE.nails = 0; }
-  else                                    { STATE.bones = 30;  STATE.diamonds = 0; STATE.lasers = 0; STATE.dirt = 0; STATE.nails = 0; }
+  if (STATE.level === 'neptune-surface') { STATE.dirt = 18; STATE.lasers = 0; STATE.bones = 30; STATE.diamonds = 0; STATE.nails = 0; STATE.spikes = 0; }
+  else if (STATE.level === 'saturn-surface') { STATE.nails = 30; STATE.lasers = 0; STATE.bones = 30; STATE.diamonds = 0; STATE.dirt = 0; STATE.spikes = 0; }
+  else if (STATE.level === 'jupiter-surface') { STATE.spikes = 36; STATE.lasers = 0; STATE.bones = 30; STATE.diamonds = 0; STATE.dirt = 0; STATE.nails = 0; }
+  else if (inSpace)                       { STATE.lasers = 24; STATE.bones = 30; STATE.diamonds = 0; STATE.dirt = 0; STATE.nails = 0; STATE.spikes = 0; }
+  else if (inOcean)                       { STATE.diamonds = 12; STATE.bones = 30; STATE.lasers = 0; STATE.dirt = 0; STATE.nails = 0; STATE.spikes = 0; }
+  else                                    { STATE.bones = 30;  STATE.diamonds = 0; STATE.lasers = 0; STATE.dirt = 0; STATE.nails = 0; STATE.spikes = 0; }
 
   // Tear down ALL scene children except camera (camera holds dog view model).
   // Deep-dispose each subtree's geometries + non-persistent materials so the
@@ -7009,6 +7223,7 @@ function rebuildLevel(fromBeginning) {
   SPACE_PICKUPS.length = 0;
   DIRT_PICKUPS.length = 0;
   NAIL_PICKUPS.length = 0;
+  SPIKE_PICKUPS.length = 0;
   PLUTO_CRACKS.length = 0;
   JUPITER_DIG.mesh = null; JUPITER_DIG.active = false;
 
@@ -7163,10 +7378,12 @@ function buildLevel(level) {
     renderer.setClearColor(0x804020);
     camera.position.set(0, PLAYER_HEIGHT, 20);
     playerYaw = Math.PI;
-    swapHeldToFangs();
+    swapHeldToSpikeGun();
     setSpacesuitVisor(true);
+    if (STATE.spikes < 18) STATE.spikes = 36;
     buildJupiterSurface();
     spawnGroundMedkits(diff().treatBase + 2);
+    spawnGroundSpikePacks(5);
   } else if (level === 'cat-ship-hijack') {
     scene.fog = null;
     renderer.setClearColor(0x101820);
@@ -7398,6 +7615,7 @@ function loop() {
   updateSpacePickups(dt);
   updateDirtPickups(dt);
   updateNailPickups(dt);
+  updateSpikePickups(dt);
   updateSaturnWind(dt);
   updateJupiterStorm(dt);
   updateCatShipHijack(dt);
