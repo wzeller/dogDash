@@ -5342,16 +5342,22 @@ function updateEnemyProjectiles(dt) {
 }
 
 function flashEnemy(enemy) {
-  const originalColor = 0x2a1a3a;
+  // Cache each child mesh's original colour the first time we flash it, then
+  // restore *that* colour — not a hard-coded one. (The previous version always
+  // restored to 0x2a1a3a, which happened to match the cat's body but turned
+  // every other enemy that colour for a frame.)
   enemy.traverse(child => {
-    if (child.isMesh && child.material.color) {
-      child.material.color.setHex(0xff4444);
+    if (!child.isMesh || !child.material || !child.material.color) return;
+    if (child.userData.origColor === undefined) {
+      child.userData.origColor = child.material.color.getHex();
     }
+    child.material.color.setHex(0xff4444);
   });
   setTimeout(() => {
     enemy.traverse(child => {
-      if (child.isMesh && child.material.color) {
-        child.material.color.setHex(originalColor);
+      if (!child.isMesh || !child.material || !child.material.color) return;
+      if (child.userData.origColor !== undefined) {
+        child.material.color.setHex(child.userData.origColor);
       }
     });
   }, 120);
