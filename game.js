@@ -47,7 +47,7 @@ const STATE = {
 };
 const DUNGEON_ROOMS = 3;       // rooms 1..3 are dungeon
 const OCEAN_LEVELS = ['ocean-surface', 'ocean-underwater', 'pirate-ship']; // rooms 4..6
-const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface', 'jupiter-surface', 'cat-ship-hijack']; // rooms 7..15
+const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface', 'jupiter-surface', 'cat-ship-hijack', 'mars-approach']; // rooms 7..16
 const OCEAN_BOUND = 18;
 const UNDERWATER_BOUND = 22;
 const SHIP_BOUND_X = 4.5;       // pirate ship deck half-width
@@ -88,6 +88,7 @@ function levelLabel(level, roomNum) {
   if (level === 'saturn-surface') return 'SATURN';
   if (level === 'jupiter-surface') return 'JUPITER';
   if (level === 'cat-ship-hijack') return 'CAT SHIP';
+  if (level === 'mars-approach') return 'TO MARS';
   return '?';
 }
 function levelBounds(level) {
@@ -103,6 +104,7 @@ function levelBounds(level) {
   if (level === 'saturn-surface') return [SATURN_BOUND, SATURN_BOUND];
   if (level === 'jupiter-surface') return [JUPITER_BOUND, JUPITER_BOUND];
   if (level === 'cat-ship-hijack') return [SPACE_BOUND_X, SPACE_BOUND_Z];   // small cockpit
+  if (level === 'mars-approach') return [SPACE_BOUND_X, SPACE_BOUND_Z];
   return [DUNGEON_BOUND, DUNGEON_BOUND];
 }
 
@@ -3830,6 +3832,192 @@ function updateTennisBall(e, dt, t) {
 }
 
 // ─── Cat Ship Hijack (room 15) ───────────────────────────────────────────────
+// ─── Mars Approach (cockpit + lit motherships + soft landing) ──────────────
+function buildMarsApproach() {
+  // Reuse cockpit + stars from space-cockpit
+  buildSpaceCockpit();
+
+  // Re-skin the "Pluto" mesh into Mars
+  const planet = scene.userData.pluto;
+  if (planet) {
+    planet.material.color.setHex(0xc05030);
+    planet.material.emissive.setHex(0x401008);
+    planet.material.emissiveIntensity = 0.55;
+    planet.material.roughness = 0.95;
+    planet.material.needsUpdate = true;
+    // White polar cap (north)
+    const cap = new THREE.Mesh(
+      new THREE.CircleGeometry(1.6, 24),
+      new THREE.MeshBasicMaterial({ color: 0xf8f8ff, transparent: true, opacity: 0.75, side: THREE.DoubleSide })
+    );
+    cap.position.set(0, 3.5, 1.0);
+    cap.rotation.x = -Math.PI / 2 + 0.2;
+    planet.add(cap);
+    // Dark spot for Valles Marineris suggestion
+    const spot = new THREE.Mesh(
+      new THREE.CircleGeometry(0.6, 18),
+      new THREE.MeshBasicMaterial({ color: 0x401008, transparent: true, opacity: 0.7 })
+    );
+    spot.position.set(-0.5, 0.2, 4.0);
+    planet.add(spot);
+    // Bands suggesting atmosphere
+    for (let i = 0; i < 3; i++) {
+      const band = new THREE.Mesh(
+        new THREE.TorusGeometry(3.8 - i * 0.4, 0.18, 6, 28),
+        new THREE.MeshBasicMaterial({ color: 0xe89070, transparent: true, opacity: 0.4 })
+      );
+      band.rotation.x = Math.PI / 2;
+      band.position.y = -0.6 + i * 0.4;
+      planet.add(band);
+    }
+  }
+  if (scene.userData.charon) scene.userData.charon.visible = false;
+
+  // Asteroid / dust debris streaming past (the inner-belt fragments)
+  const debris = [];
+  const debrisMat = new THREE.MeshStandardMaterial({ color: 0x806050, roughness: 0.9, metalness: 0.1 });
+  const debrisCount = isTouchDevice() ? 22 : 45;
+  for (let i = 0; i < debrisCount; i++) {
+    const r = 0.18 + Math.random() * 0.4;
+    const chunk = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), debrisMat);
+    chunk.position.set(
+      (Math.random() - 0.5) * 32,
+      (Math.random() - 0.5) * 18,
+      -10 - Math.random() * 110,
+    );
+    chunk.userData.spin = new THREE.Vector3(Math.random()*2, Math.random()*2, Math.random()*2);
+    chunk.userData.scroll = 30 + Math.random() * 15;
+    scene.add(chunk);
+    debris.push(chunk);
+  }
+  scene.userData.ringDebris = debris;   // reuse Saturn's debris updater path
+
+  scene.userData.spacePhase = 'fight';
+  scene.userData.spaceTarget = 'mars';
+}
+
+// ─── Enemy: Enormous Lit Mothership ─────────────────────────────────────────
+function spawnMarsMothership(x, y, z) {
+  const ship = new THREE.Group();
+  const hullMat = new THREE.MeshStandardMaterial({
+    color: 0x4a4a52, roughness: 0.45, metalness: 0.6,
+    emissive: 0x1a1a22, emissiveIntensity: 0.35,
+  });
+  const trimMat = new THREE.MeshStandardMaterial({
+    color: 0x202028, metalness: 0.85, roughness: 0.25,
+  });
+  const domeMat = new THREE.MeshStandardMaterial({
+    color: 0x80c0ff, roughness: 0.15, metalness: 0.4,
+    transparent: true, opacity: 0.55, emissive: 0x4080ff, emissiveIntensity: 0.4,
+  });
+
+  const SAUCER_R = 6.0;
+  // Massive squashed saucer body
+  const saucer = new THREE.Mesh(new THREE.SphereGeometry(SAUCER_R, 30, 18), hullMat);
+  saucer.scale.set(1, 0.32, 1);
+  ship.add(saucer);
+  // Rim trim
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(SAUCER_R, 0.3, 12, 40), trimMat);
+  rim.rotation.x = Math.PI / 2;
+  ship.add(rim);
+  // Top dome
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(2.4, 24, 16, 0, Math.PI*2, 0, Math.PI/2),
+    domeMat
+  );
+  dome.position.y = 0.7;
+  ship.add(dome);
+
+  // ── Cover the hull with LIGHTS (MeshBasic spheres — no actual PointLights to
+  // avoid shader recompiles when ships spawn). 30 lights in rotating colours. ──
+  const lightColors = [0xffe060, 0xff4060, 0x60ffff, 0xff8030, 0xa080ff];
+  ship.userData.hullLights = [];
+  // Place ~25 lights around the rim
+  const rimLightCount = 24;
+  for (let i = 0; i < rimLightCount; i++) {
+    const a = (i / rimLightCount) * Math.PI * 2;
+    const c = lightColors[i % lightColors.length];
+    const lit = new THREE.Mesh(
+      new THREE.SphereGeometry(0.22, 10, 8),
+      new THREE.MeshBasicMaterial({ color: c })
+    );
+    lit.position.set(Math.cos(a) * SAUCER_R * 0.93, -0.55, Math.sin(a) * SAUCER_R * 0.93);
+    lit.userData.blinkPhase = Math.random() * Math.PI * 2;
+    lit.userData.baseColor = c;
+    ship.add(lit);
+    ship.userData.hullLights.push(lit);
+  }
+  // Place 12 more on the saucer's upper face (skipping a region for the weak spot)
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2 + 0.12;
+    // Skip an arc around the weak-spot direction (we'll put weak spot at angle 0)
+    if (Math.abs(((a + Math.PI) % (Math.PI * 2)) - Math.PI) < 0.5) continue;
+    const r = 2.2 + Math.random() * 2.2;
+    const c = lightColors[(i + 2) % lightColors.length];
+    const lit = new THREE.Mesh(
+      new THREE.SphereGeometry(0.2, 10, 8),
+      new THREE.MeshBasicMaterial({ color: c })
+    );
+    lit.position.set(Math.cos(a) * r, 0.45, Math.sin(a) * r);
+    lit.userData.blinkPhase = Math.random() * Math.PI * 2;
+    lit.userData.baseColor = c;
+    ship.add(lit);
+    ship.userData.hullLights.push(lit);
+  }
+
+  // ── DARK SPOT — the weak point. A small unlit patch on the hull's edge ──
+  // Positioned at the rim opposite the densest lights so it's visually distinct.
+  const WEAK_R = 0.85;
+  const darkArea = new THREE.Mesh(
+    new THREE.SphereGeometry(WEAK_R, 16, 12),
+    new THREE.MeshStandardMaterial({ color: 0x0a0a0e, roughness: 0.9, metalness: 0.2 })
+  );
+  // Sit it on the rim at angle = 0 (saucer's +X direction)
+  darkArea.position.set(SAUCER_R * 0.92, -0.05, 0);
+  ship.add(darkArea);
+  ship.userData.weakPoint = darkArea;
+  ship.userData.weakRadius = WEAK_R * 1.1;   // slightly generous
+
+  // Underside cannons (3 around the bottom)
+  ship.userData.cannons = [];
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2 + Math.PI / 6;
+    const turret = new THREE.Group();
+    const barrel = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.18, 0.22, 1.6, 10),
+      trimMat
+    );
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(0, 0, -0.8);
+    turret.add(barrel);
+    const tip = new THREE.Mesh(
+      new THREE.SphereGeometry(0.18, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xff4060 })
+    );
+    tip.position.set(0, 0, -1.6);
+    turret.add(tip);
+    turret.userData.tip = tip;
+    turret.position.set(Math.cos(a) * SAUCER_R * 0.5, -0.6, Math.sin(a) * SAUCER_R * 0.5);
+    turret.rotation.y = -a + Math.PI;
+    ship.add(turret);
+    ship.userData.cannons.push(turret);
+  }
+
+  ship.position.set(x, y, z);
+  ship.userData.speed = 1.4 + Math.random() * 0.6;
+  ship.userData.attackTimer = 1.5 + Math.random() * 1.0;
+  ship.userData.bobOffset = Math.random() * Math.PI * 2;
+  ship.userData.driftPhase = Math.random() * Math.PI * 2;
+  ship.userData.isMothership = true;
+  ship.userData.health = 9999;     // effectively only the weak spot kills it
+  ship.userData.hitOffsetY = 0;
+  ship.userData.hitRadius = SAUCER_R;
+
+  scene.add(ship);
+  ENEMIES.push(ship);
+  return ship;
+}
+
 function buildCatShipHijack() {
   // Re-use the cockpit shell as the base
   buildSpaceCockpit();
@@ -3922,7 +4110,8 @@ function startCatShipHijackSequence() {
     setTimeout(() => { overlay.style.opacity = '1'; }, 600);
     setTimeout(() => {
       overlay.style.background = '#000';
-      victoryGame();
+      transitioning = false;
+      loadNextRoom();   // → room 16 = mars-approach
     }, 1400);
   }, 11500);
 }
@@ -5110,6 +5299,40 @@ function updateProjectiles(dt) {
         consumed = true;
         break;
       }
+      // Mothership: only the dark-spot kills it. Lit-hull hits deflect.
+      if (enemy.userData.isMothership) {
+        // Broad sphere first — if the shot is nowhere near the saucer, skip
+        const hullR = enemy.userData.hitRadius || 6;
+        if (segmentSphereHit(prev, p.position, enemy.position, hullR) === null) continue;
+        // Now check the weak spot
+        const weak = enemy.userData.weakPoint;
+        const wPos = weak.getWorldPosition(SCRATCH.vB);
+        const wr = enemy.userData.weakRadius || 0.9;
+        const tt = segmentSphereHit(prev, p.position, wPos, wr);
+        const hitPos = SCRATCH.vC.copy(prev).lerp(p.position, tt !== null ? tt : 0.5);
+        if (tt !== null) {
+          // DARK SPOT HIT — explosion
+          spawnExplosionFlash(wPos.clone());
+          for (let k = 0; k < 6; k++) spawnBossSparks(hitPos, k % 2 ? 0xffa040 : 0xffe060);
+          spawnDamageNumber(hitPos, 'KO', '#ffe060');
+          flashHitVignette();
+          scene.remove(enemy);
+          ENEMIES.splice(j, 1);
+        } else {
+          // Lit hull — sparks, no damage
+          spawnBossSparks(hitPos, 0x80c0ff);
+          spawnDamageNumber(hitPos, 0, '#a0c8ff');
+          const now = performance.now();
+          if (!scene.userData.lastDeflectHint || now - scene.userData.lastDeflectHint > 2200) {
+            scene.userData.lastDeflectHint = now;
+            showMessage('AIM FOR THE DARK SPOT!', 900);
+          }
+        }
+        scene.remove(p);
+        PROJECTILES.splice(i, 1);
+        consumed = true;
+        break;
+      }
       // Regular enemies — use segment-sphere for fast projectiles (lasers/missiles/
       // nails travel >50 m/s and can skip past targets at low FPS otherwise).
       // Bones/diamonds/dirt fall back to the cheaper point-in-sphere check.
@@ -5895,12 +6118,12 @@ function updateSpaceProgress(dt) {
   if (!planet) return;
 
   const phase = scene.userData.spacePhase;
-  const target = scene.userData.spaceTarget;   // 'neptune' | 'saturn' | undefined (Pluto)
+  const target = scene.userData.spaceTarget;   // 'neptune' | 'saturn' | 'mars' | undefined (Pluto)
 
   // Movement: planet inches in during fight, surges in during approach
   let dz;
-  if (phase === 'fight')         dz = target === 'neptune' ? 0.05 : 0.25;
-  else if (phase === 'approach') dz = target === 'neptune' ? 12.0 : 16.0;
+  if (phase === 'fight')         dz = (target === 'neptune' || target === 'mars') ? 0.05 : 0.25;
+  else if (phase === 'approach') dz = target === 'neptune' ? 12.0 : target === 'mars' ? 11.0 : 16.0;
   else                            dz = 0;
   planet.position.z += dz * dt;
   if (charon) charon.position.z += dz * dt;
@@ -5916,6 +6139,7 @@ function updateSpaceProgress(dt) {
   if (phase === 'approach' && dist < 8 && !transitioning) {
     if (target === 'neptune')      triggerNeptuneLanding();
     else if (target === 'saturn')  triggerSaturnCrash();
+    else if (target === 'mars')    triggerMarsLanding();
     else                            triggerPlutoCrash();
   }
 }
@@ -5996,6 +6220,21 @@ function triggerJupiterDig() {
     transitioning = false;
     loadNextRoom();                            // → room 15 = cat-ship-hijack
   }, 2400);
+}
+
+function triggerMarsLanding() {
+  transitioning = true;
+  scene.userData.spacePhase = 'crash';
+  document.exitPointerLock();
+  showMessage('TOUCHING DOWN ON MARS… 🔴', 2800);
+  const overlay = document.getElementById('transition-overlay');
+  overlay.style.background = '#d04020';
+  overlay.style.opacity = '0';
+  setTimeout(() => { overlay.style.opacity = '1'; }, 1200);
+  setTimeout(() => {
+    overlay.style.background = '#000';
+    victoryGame();
+  }, 2200);
 }
 
 function triggerNeptuneLanding() {
@@ -6096,6 +6335,10 @@ function checkDoorTransition() {
       // All fighters destroyed — surge into Saturn for the crash finale
       scene.userData.spacePhase = 'approach';
       showMessage('FIGHTERS DOWN! INCOMING SATURN! 🪐💥', 4500);
+    } else if (STATE.level === 'mars-approach') {
+      // Motherships down — soft landing on Mars
+      scene.userData.spacePhase = 'approach';
+      showMessage('MOTHERSHIPS DESTROYED! DESCENDING TO MARS… 🔴', 4500);
     } else if (STATE.level === 'pluto-surface') {
       // A rocketship lands on the ice (visible from anywhere)
       buildPlutoRocketship();
@@ -6203,7 +6446,11 @@ function victoryGame() {
   const t = document.getElementById('victory-title');
   const s1 = document.getElementById('victory-sub1');
   const s2 = document.getElementById('victory-sub2');
-  if (STATE.level === 'cat-ship-hijack') {
+  if (STATE.level === 'mars-approach') {
+    if (t) t.textContent = 'MARS!';
+    if (s1) s1.textContent = 'MOTHERSHIPS DOWN • SOFT LANDING';
+    if (s2) s2.textContent = `THE RED PLANET IS YOURS • ${STATE.diamonds} 💎`;
+  } else if (STATE.level === 'cat-ship-hijack') {
     if (t) t.textContent = 'HIJACKED!';
     if (s1) s1.textContent = 'YOU ARE THE FIGHTER NOW — COSMIC GOOD BOY';
     if (s2) s2.textContent = `…the next chapter is coming • ${STATE.diamonds} 💎`;
@@ -6319,6 +6566,7 @@ function loadNextRoom() {
       'saturn-surface':   'SATURN STORM! WATER-GUN ALIENS! NAILGUN AT THE READY! 🔨💧',
       'jupiter-surface':  'JUPITER STORM! SPIKE-LAUNCH THE TENNIS BALLS! 🎾🗡️',
       'cat-ship-hijack':  'TRAPPED IN A CAT SHIP CAGE… 😾',
+      'mars-approach':    'MARS APPROACH! LIT MOTHERSHIPS — SHOOT THEIR DARK SPOT! 🔴',
       'dungeon':          `ROOM ${currentRoom} — SPOOKIER IN HERE...`,
     };
     showMessage(intro[STATE.level] || '', 3500);
@@ -6333,6 +6581,52 @@ function updateEnemies(dt) {
   const onSurface = STATE.level === 'ocean-surface';
   const inSpace = isSpaceLike(STATE.level);
   for (const e of ENEMIES) {
+    if (e.userData.isMothership) {
+      // Slow drift, rotate (so weak spot tracks around), fire cannons periodically
+      const to = SCRATCH.vA.set(camera.position.x - e.position.x, 0, camera.position.z - e.position.z);
+      const dist = to.length();
+      if (dist > 0.001) to.multiplyScalar(1 / dist);
+      const holdDist = 28;
+      if (dist > holdDist + 4) e.position.addScaledVector(to, e.userData.speed * dt);
+      else if (dist < holdDist - 4) e.position.addScaledVector(to, -e.userData.speed * 0.8 * dt);
+      // Side drift
+      e.position.x += Math.sin(t * 0.55 + e.userData.driftPhase) * 0.9 * dt;
+      e.position.y += Math.sin(t * 0.4 + e.userData.bobOffset) * 0.25 * dt;
+      // Constant rotation so the weak spot rotates around — adds skill
+      e.rotation.y += dt * 0.55;
+      e.rotation.z = Math.sin(t * 0.7 + e.userData.driftPhase) * 0.06;
+
+      // Blink hull lights independently
+      if (e.userData.hullLights) {
+        for (const lit of e.userData.hullLights) {
+          const on = Math.sin(t * 3 + lit.userData.blinkPhase) > -0.2;
+          lit.visible = on;
+        }
+      }
+
+      // Fire cannons — pick best-aimed turret
+      e.userData.attackTimer -= dt;
+      if (e.userData.attackTimer <= 0) {
+        e.userData.attackTimer = 1.6 + Math.random() * 0.8;
+        let best = null, bestDot = -2;
+        const toPlayerWorld = SCRATCH.vB.set(camera.position.x - e.position.x, camera.position.y - e.position.y, camera.position.z - e.position.z).normalize();
+        for (const turret of (e.userData.cannons || [])) {
+          const tipWorld = turret.userData.tip.getWorldPosition(SCRATCH.vC);
+          const fwd = SCRATCH.vD.set(tipWorld.x - e.position.x, tipWorld.y - e.position.y, tipWorld.z - e.position.z).normalize();
+          const dot = fwd.dot(toPlayerWorld);
+          if (dot > bestDot) { bestDot = dot; best = turret; }
+        }
+        if (best) {
+          const tipWorld = best.userData.tip.getWorldPosition(new THREE.Vector3());
+          const dir = new THREE.Vector3().subVectors(camera.position, tipWorld).normalize();
+          spawnEnemyLaser(tipWorld, dir, 12);
+          best.userData.tip.material.color.setHex(0xffffff);
+          setTimeout(() => best.userData.tip.material.color.setHex(0xff4060), 100);
+        }
+      }
+      continue;
+    }
+
     if (e.userData.isTennisBall) {
       updateTennisBall(e, dt, t);
       // Contact bump: if they ram into the player, push the player a bit
@@ -7399,6 +7693,17 @@ function buildLevel(level) {
     setSpacesuitVisor(false);
     buildCatShipHijack();
     startCatShipHijackSequence();
+  } else if (level === 'mars-approach') {
+    scene.fog = null;
+    renderer.setClearColor(0x100808);
+    camera.position.set(0, PLAYER_HEIGHT + 0.4, 0);
+    playerYaw = 0; playerPitch = 0;
+    swapHeldToLaser();
+    setSpacesuitVisor(false);
+    if (STATE.lasers < 60) STATE.lasers = 90;
+    buildMarsApproach();
+    spawnSpaceHealthPacks(4);
+    spawnSpaceLaserPacks(6);    // generous laser supply — user explicitly asked
   }
 }
 
@@ -7432,6 +7737,7 @@ const DEV_ROOMS = [
   { room: 13, label: 'Room 13 — Saturn Surface (Storm)' },
   { room: 14, label: 'Room 14 — Jupiter (Tennis Balls)' },
   { room: 15, label: 'Room 15 — Cat Ship Hijack' },
+  { room: 16, label: 'Room 16 — Mars Approach (Motherships)' },
 ];
 
 function toggleDevMenu() {
@@ -7543,6 +7849,15 @@ function updateSpawner(dt) {
         const z = Math.sin(angle) * r;
         spawnGrayAlien(x, z);
         enemyLabel = 'GRAY ALIEN';
+      } else if (STATE.level === 'mars-approach') {
+        // One enormous mothership per wave — spawn just one regardless of `count`
+        if (i === 0) {
+          const xx = (Math.random() - 0.5) * 14;
+          const yy = (Math.random() - 0.5) * 6 + 1;
+          const zz = -32 - Math.random() * 10;
+          spawnMarsMothership(xx, yy, zz);
+        }
+        enemyLabel = 'MOTHERSHIP';
       } else if (STATE.level === 'saturn-approach') {
         // Star-wars fighters peel out of the rings — mix of TIE + X-Wing
         const kind = Math.random() < 0.55 ? 'tie' : 'xwing';
