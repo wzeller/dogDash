@@ -168,6 +168,45 @@
       box-shadow: 0 0 12px #ff6b35;
     }
 
+    /* Off-screen enemy markers — pool of red triangles pointing toward enemies */
+    .enemy-marker {
+      position: absolute;
+      width: 0; height: 0;
+      border-left: 10px solid transparent;
+      border-right: 10px solid transparent;
+      border-bottom: 16px solid #ff4060;
+      filter: drop-shadow(0 0 6px #ff4060);
+      pointer-events: none;
+      transform-origin: 50% 60%;
+    }
+
+    /* Damage-direction indicator: a radial gradient that fades from one screen edge */
+    #damage-indicator {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 46;
+      opacity: 0;
+      transition: opacity 0.55s ease-out;
+      background: radial-gradient(ellipse 110% 60% at 50% -10%, rgba(255, 40, 60, 0.55), rgba(255, 40, 60, 0) 60%);
+    }
+
+    /* Low-ammo / low-health pulse */
+    .low {
+      color: #ff4040 !important;
+      text-shadow: 0 0 12px #ff4040 !important;
+      animation: lowPulse 0.65s ease-in-out infinite;
+    }
+    @keyframes lowPulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+    /* Health-bar low state — pulsing red border */
+    #health-bar.low {
+      border-color: #ff2020 !important;
+      box-shadow: 0 0 14px #ff2020 !important;
+    }
+
     /* Force the game-over/victory overlays above absolutely everything on mobile.
        Setting style.display via JS sometimes fights iOS Safari's inline-style
        resolution — using a class with !important is the bulletproof path. */
@@ -343,6 +382,12 @@
 
   <!-- Hit vignette — bright green edge flash on boss weak-point hit -->
   <div id="hit-vignette" style="position:fixed; inset:0; pointer-events:none; z-index:45; opacity:0; transition:opacity 0.18s; background:radial-gradient(ellipse at center, transparent 55%, rgba(120,255,140,0.55) 100%); mix-blend-mode:screen;"></div>
+
+  <!-- Damage-direction indicator (rotated to point at the source of damage) -->
+  <div id="damage-indicator"></div>
+
+  <!-- Off-screen enemy marker container -->
+  <div id="enemy-markers" style="position:fixed; inset:0; pointer-events:none; z-index:44;"></div>
 
   <!-- Spacesuit visor overlay (shown on Pluto surface) -->
   <div id="visor" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:40;">

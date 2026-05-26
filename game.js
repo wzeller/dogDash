@@ -357,10 +357,151 @@ let playerYaw = 0, playerPitch = 0;
 let playerVelocityY = 0;
 const playerState = { crackFalling: false };
 
+// ─── Procedural audio (Web Audio API) ────────────────────────────────────────
+// Lazy-initialized on first user gesture (browser policy). All sounds are
+// synthesised on the fly — no external assets. M toggles mute.
+const AUDIO = { ctx: null, master: null, muted: false };
+function initAudio() {
+  if (AUDIO.ctx) {
+    if (AUDIO.ctx.state === 'suspended') AUDIO.ctx.resume();
+    return;
+  }
+  try {
+    AUDIO.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    AUDIO.master = AUDIO.ctx.createGain();
+    AUDIO.master.gain.value = 0.35;
+    AUDIO.master.connect(AUDIO.ctx.destination);
+  } catch (e) { /* browser without WebAudio — silent */ }
+}
+
+function playSound(kind) {
+  if (AUDIO.muted || !AUDIO.ctx) return;
+  const ctx = AUDIO.ctx;
+  const now = ctx.currentTime;
+  const tone = (f1, f2, dur, type = 'sine', peak = 0.35) => {
+    const osc = ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f1, now);
+    if (f2 !== f1) osc.frequency.exponentialRampToValueAtTime(Math.max(40, f2), now + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(peak, now + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    osc.connect(g); g.connect(AUDIO.master);
+    osc.start(now); osc.stop(now + dur + 0.02);
+  };
+  const noise = (dur, peak = 0.25, lpHz = 1800) => {
+    const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1);
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = lpHz;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(peak, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    src.connect(filt); filt.connect(g); g.connect(AUDIO.master);
+    src.start(now); src.stop(now + dur + 0.02);
+  };
+  switch (kind) {
+    case 'fire':    tone(720, 280, 0.08, 'square',   0.22); break;
+    case 'missile': tone(110,  60, 0.30, 'sawtooth', 0.35); noise(0.18, 0.18, 900); break;
+    case 'hit':     noise(0.06, 0.30, 4000); tone(900, 1200, 0.04, 'square', 0.18); break;
+    case 'pickup':  tone(560, 1120, 0.12, 'triangle', 0.30); break;
+    case 'hurt':    noise(0.20, 0.32, 600);  tone(220, 110, 0.18, 'sawtooth', 0.30); break;
+    case 'kill':    tone(620, 140, 0.22, 'square',   0.32); noise(0.12, 0.20, 1400); break;
+    case 'death':   tone(180,  50, 0.55, 'sawtooth', 0.4); break;
+    case 'victory': tone(523, 523, 0.16, 'triangle', 0.32);
+                    setTimeout(() => tone(659, 659, 0.16, 'triangle', 0.32), 140);
+                    setTimeout(() => tone(784, 784, 0.30, 'triangle', 0.34), 280); break;
+    case 'door':    tone(140, 360, 0.30, 'sine',     0.20); break;
+    case 'explode': noise(0.4, 0.45, 800); tone(90, 30, 0.45, 'sawtooth', 0.4); break;
+    case 'car':     tone(220, 180, 0.12, 'square',   0.20); break;
+  }
+}
+
 // Axis-aligned obstacles a level builder can register; resolved in updatePlayer
 // after the bounds clamp. isActive() lets things toggle (e.g. doors that open).
 const LEVEL_OBSTACLES = [];
 function clearLevelObstacles() { LEVEL_OBSTACLES.length = 0; }
+
+// ─── Off-screen enemy markers ────────────────────────────────────────────────
+// Per-frame, projects every enemy to screen space and pins a red arrow at the
+// screen edge for those that are off-screen (behind or outside the viewport).
+const ENEMY_MARKER_POOL = [];
+function updateEnemyMarkers() {
+  const container = document.getElementById('enemy-markers');
+  if (!container) return;
+  // Hide all pooled markers first
+  for (const m of ENEMY_MARKER_POOL) m.style.display = 'none';
+  if (!STATE.started || STATE.gameover || !ENEMIES.length) return;
+
+  const w = window.innerWidth, h = window.innerHeight;
+  const margin = 36;
+  let used = 0;
+  for (let i = 0; i < ENEMIES.length && used < 8; i++) {
+    const e = ENEMIES[i];
+    // Skip the red-circle target / the boss weak-point sphere — they're not threats per se
+    if (e.userData.isRedCircle) continue;
+    // World position with hit-offset, project to NDC
+    SCRATCH.vA.copy(e.position);
+    SCRATCH.vA.y += e.userData.hitOffsetY || 0.5;
+    const ndc = SCRATCH.vA.project(camera);
+    const behind = ndc.z > 1;
+    const onScreen = !behind && Math.abs(ndc.x) <= 1 && Math.abs(ndc.y) <= 1;
+    if (onScreen) continue;
+    // For behind-camera, flip both axes so the marker points "back"
+    let sx = ndc.x, sy = ndc.y;
+    if (behind) { sx = -sx; sy = -sy; }
+    // Clamp to unit-square edge
+    const ax = Math.abs(sx), ay = Math.abs(sy);
+    const k = Math.max(ax, ay, 0.001);
+    sx /= k; sy /= k;
+    // NDC → pixel
+    const px = (sx + 1) / 2 * (w - 2 * margin) + margin;
+    const py = (1 - (sy + 1) / 2) * (h - 2 * margin) + margin;
+    // Rotation: triangle's default points up (negative-y in CSS terms)
+    const ang = Math.atan2(sx, sy);    // CSS y-down so swap args
+
+    let marker = ENEMY_MARKER_POOL[used];
+    if (!marker) {
+      marker = document.createElement('div');
+      marker.className = 'enemy-marker';
+      container.appendChild(marker);
+      ENEMY_MARKER_POOL.push(marker);
+    }
+    marker.style.display = 'block';
+    marker.style.left = px + 'px';
+    marker.style.top  = py + 'px';
+    marker.style.transform = `translate(-50%, -50%) rotate(${ang}rad)`;
+    used++;
+  }
+}
+
+// ─── Damage direction indicator ──────────────────────────────────────────────
+let _dmgFadeTimer = null;
+function showDamageIndicator(sourcePos) {
+  const el = document.getElementById('damage-indicator');
+  if (!el || !sourcePos) return;
+  // Angle from player position to source, projected to camera's facing frame.
+  const dx = sourcePos.x - camera.position.x;
+  const dz = sourcePos.z - camera.position.z;
+  // World angle of the source (atan2 in z-forward convention)
+  const worldAngle = Math.atan2(dx, dz);
+  // Camera faces -Z by default; rotated by playerYaw on Y. Forward angle in z-forward
+  // convention is (playerYaw + π) because facing -Z = z=−1 → atan2(0, -1) = π.
+  const forwardAngle = playerYaw + Math.PI;
+  // Relative angle: 0 = directly in front, ±π = behind
+  let rel = worldAngle - forwardAngle;
+  while (rel >  Math.PI) rel -= Math.PI * 2;
+  while (rel < -Math.PI) rel += Math.PI * 2;
+  // Indicator's default gradient is at the TOP (rotation = 0 → glow at top).
+  // For the glow to appear on the side the damage came from, rotate by rel.
+  el.style.transform = `rotate(${rel}rad)`;
+  el.style.opacity = '1';
+  if (_dmgFadeTimer) clearTimeout(_dmgFadeTimer);
+  _dmgFadeTimer = setTimeout(() => { el.style.opacity = '0'; }, 90);
+}
 function addLevelBox(minX, maxX, minZ, maxZ, isActive) {
   LEVEL_OBSTACLES.push({ minX, maxX, minZ, maxZ, isActive: isActive || null });
 }
@@ -409,6 +550,12 @@ function init() {
       e.preventDefault();
     }
     KEYS[e.code] = true;
+    initAudio();   // any keypress is a user gesture — safe place to bring audio up
+    if (e.code === 'KeyM') {
+      AUDIO.muted = !AUDIO.muted;
+      showMessage(AUDIO.muted ? '🔇 MUTED' : '🔊 SOUND ON', 1000);
+      return;
+    }
     if (e.code === 'Backquote') {
       e.preventDefault();
       toggleDevMenu();
@@ -1968,6 +2115,7 @@ function throwDirt() {
   if (STATE.dirt <= 0 || STATE.gameover) return;
   STATE.dirt--;
   updateHUD();
+  playSound('fire');
 
   const clod = makeDirtClod();
   clod.position.copy(camera.position);
@@ -2035,7 +2183,7 @@ function updateDirtPickups(dt) {
       const grab = 4;
       STATE.dirt = Math.min(STATE.dirt + grab, 40);
       updateHUD();
-      showMessage(`+${grab} DIRT CLODS!`, 1100);
+      showMessage(`+${grab} DIRT CLODS!`, 1100); playSound('pickup');
       scene.remove(d);
       DIRT_PICKUPS.splice(i, 1);
     }
@@ -2578,6 +2726,7 @@ function throwMissile() {
   if (STATE.missiles <= 0 || STATE.gameover) return;
   STATE.missiles--;
   updateHUD();
+  playSound('missile');
 
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
@@ -2621,6 +2770,7 @@ function explodeMissile(missile, hitPos) {
 }
 
 function spawnExplosionFlash(pos) {
+  playSound('explode');
   const flash = new THREE.PointLight(0xffa040, 8, 18, 1.5);
   flash.position.copy(pos);
   scene.add(flash);
@@ -3033,6 +3183,7 @@ function throwNail() {
   if (STATE.nails <= 0 || STATE.gameover) return;
   STATE.nails--;
   updateHUD();
+  playSound('fire');
 
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
@@ -3141,7 +3292,7 @@ function updateNailPickups(dt) {
       const grab = 12;
       STATE.nails = Math.min(STATE.nails + grab, 60);
       updateHUD();
-      showMessage(`+${grab} NAILS!`, 1100);
+      showMessage(`+${grab} NAILS!`, 1100); playSound('pickup');
       scene.remove(d);
       NAIL_PICKUPS.splice(i, 1);
     }
@@ -3509,6 +3660,7 @@ function throwSpike() {
   if (STATE.spikes <= 0 || STATE.gameover) return;
   STATE.spikes--;
   updateHUD();
+  playSound('fire');
 
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
@@ -3628,7 +3780,7 @@ function updateSpikePickups(dt) {
       const grab = 10;
       STATE.spikes = Math.min(STATE.spikes + grab, 60);
       updateHUD();
-      showMessage(`+${grab} SPIKES!`, 1100);
+      showMessage(`+${grab} SPIKES!`, 1100); playSound('pickup');
       scene.remove(d);
       SPIKE_PICKUPS.splice(i, 1);
     }
@@ -4932,6 +5084,7 @@ function updateRocketInterior(dt) {
         ROCKET_INT.door.userData.lock.material.color.setHex(0x40ff60);
       }
       showMessage('KEY ACQUIRED! THE DOOR UNLOCKS! 🔓', 3000);
+      playSound('pickup');
     }
   }
 
@@ -4952,6 +5105,7 @@ function updateRocketInterior(dt) {
           if (ROCKET_INT.door.userData.lock) ROCKET_INT.door.userData.lock.visible = false;
           ROCKET_INT.phase = 'kennel';
           showMessage('A KENNEL! FREE THE DOGS — CLICK/FIRE NEAR EACH CAGE! 🐕', 4500);
+          playSound('door');
         }
       };
       requestAnimationFrame(slide);
@@ -5563,7 +5717,8 @@ function updateEarth(dt) {
     const inZ = Math.abs(dz) < (c.length / 2 + 0.4);
     if (inX && inZ && !playerState.crackFalling) {
       playerState.crackFalling = true;     // reusing the "hit recently" debounce
-      damagePlayer(15);
+      damagePlayer(15, c.mesh.position);
+      playSound('car');
       showMessage('💥 CAR HIT YOU!', 1200);
       // Push player out perpendicular to road
       camera.position.x += Math.sign(dx || 1) * 1.4;
@@ -5730,6 +5885,7 @@ function deliverDogToHouse(dog, house) {
   if (house.window) house.window.material.emissiveIntensity = 1.8;
   EARTH.delivered++;
   showMessage(`🏠 HOME! ${EARTH.delivered}/6 DOGS DELIVERED!`, 2200);
+  playSound('door');
 }
 
 function triggerHomecoming() {
@@ -5913,6 +6069,7 @@ function throwLaser() {
   if (STATE.lasers <= 0 || STATE.gameover) return;
   STATE.lasers--;
   updateHUD();
+  playSound('fire');
 
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
@@ -6445,12 +6602,15 @@ function swapHeldToBone() {
 
 // ─── Throw dispatch ──────────────────────────────────────────────────────────
 function throwAmmo() {
+  // Per-weapon fire sound (the throw functions early-return if out of ammo, so
+  // we only want to ding when something actually fires — let each helper
+  // play its own sound)
   if (STATE.level === 'neptune-surface') return throwDirt();
   if (STATE.level === 'saturn-surface') return throwNail();
   if (STATE.level === 'jupiter-surface') return throwSpike();
-  if (STATE.level === 'cat-ship-hijack') return;   // can't fire during hijack cinematic
-  if (STATE.level === 'rocket-interior') return rocketInteract();   // FIRE opens cages
-  if (STATE.level === 'earth') return;             // no weapons on Earth — peaceful homecoming
+  if (STATE.level === 'cat-ship-hijack') return;
+  if (STATE.level === 'rocket-interior') return rocketInteract();
+  if (STATE.level === 'earth') return;
   if (isSpaceLike(STATE.level)) return throwLaser();
   if (isOceanLike(STATE.level)) return throwDiamond();
   return throwBone();
@@ -6463,6 +6623,7 @@ function throwBone() {
   if (STATE.bones <= 0 || STATE.gameover) return;
   STATE.bones--;
   updateHUD();
+  playSound('fire');
 
   const bone = new THREE.Group();
   const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.35, 8), boneMat3);
@@ -6530,6 +6691,7 @@ function throwDiamond() {
   if (STATE.diamonds <= 0 || STATE.gameover) return;
   STATE.diamonds--;
   updateHUD();
+  playSound('fire');
 
   const gem = makeDiamondMesh();
   gem.position.copy(camera.position);
@@ -6823,6 +6985,7 @@ function onMouseMove(e) {
 }
 
 function onClick(e) {
+  initAudio();
   if (!STATE.started || STATE.gameover) return;
   // Only react to clicks on the game canvas — buttons, menus, etc. shouldn't lock the pointer
   if (e && e.target && e.target.id !== 'canvas') return;
@@ -7367,7 +7530,7 @@ function updateEnemyProjectiles(dt) {
     const dy = p.position.y - camera.position.y;
     const dz = p.position.z - camera.position.z;
     if (dx*dx + dy*dy + dz*dz < 0.7 * 0.7) {
-      damagePlayer(p.userData.damage);
+      damagePlayer(p.userData.damage, p.position);
       scene.remove(p);
       ENEMY_PROJECTILES.splice(i, 1);
       continue;
@@ -7381,6 +7544,7 @@ function updateEnemyProjectiles(dt) {
 }
 
 function flashEnemy(enemy) {
+  playSound('hit');
   // Cache each child mesh's original colour the first time we flash it, then
   // restore *that* colour — not a hard-coded one. (The previous version always
   // restored to 0x2a1a3a, which happened to match the cat's body but turned
@@ -7405,6 +7569,7 @@ function flashEnemy(enemy) {
 function killEnemy(index) {
   const enemy = ENEMIES[index];
   spawnDeathParticles(enemy.position.clone());
+  playSound('kill');
   scene.remove(enemy);
   ENEMIES.splice(index, 1);
   if (isSpaceLike(STATE.level)) {
@@ -7504,7 +7669,7 @@ function updateBonePickups(dt) {
     if (Math.sqrt(dx*dx + dz*dz) < 0.9) {
       STATE.bones = Math.min(STATE.bones + 3, 40);
       updateHUD();
-      showMessage('+3 BONES!', 1000);
+      showMessage('+3 BONES!', 1000); playSound('pickup');
       scene.remove(b);
       BONE_PICKUPS.splice(i, 1);
     }
@@ -7581,7 +7746,7 @@ function updateDiamondPickups(dt) {
     if (Math.sqrt(dx*dx + dz*dz) < 0.9) {
       STATE.diamonds = Math.min(STATE.diamonds + 3, 40);
       updateHUD();
-      showMessage('+3 DIAMONDS!', 1000);
+      showMessage('+3 DIAMONDS!', 1000); playSound('pickup');
       scene.remove(d);
       DIAMOND_PICKUPS.splice(i, 1);
     }
@@ -7702,7 +7867,7 @@ function updateTreatPickups(dt) {
       const gained = Math.min(heal, 100 - STATE.health);
       STATE.health = Math.min(100, STATE.health + heal);
       updateHUD();
-      showMessage(gained > 0 ? `+${gained} HP! GOOD BOY!` : 'HEALTH FULL!', 1500);
+      showMessage(gained > 0 ? `+${gained} HP! GOOD BOY!` : 'HEALTH FULL!', 1500); playSound('pickup');
       scene.remove(tr);
       TREAT_PICKUPS.splice(i, 1);
     }
@@ -7910,7 +8075,7 @@ function updateSpacePickups(dt) {
         const gained = Math.min(p.userData.heal, 100 - STATE.health);
         STATE.health = Math.min(100, STATE.health + p.userData.heal);
         updateHUD();
-        showMessage(gained > 0 ? `+${gained} HP! GOOD BOY!` : 'HULL FULL!', 1400);
+        showMessage(gained > 0 ? `+${gained} HP! GOOD BOY!` : 'HULL FULL!', 1400); playSound('pickup');
       } else if (p.userData.isLaserPack) {
         STATE.lasers = Math.min(STATE.lasers + p.userData.lasers, 60);
         updateHUD();
@@ -7918,7 +8083,7 @@ function updateSpacePickups(dt) {
       } else if (p.userData.isMissilePack) {
         STATE.missiles = Math.min(STATE.missiles + p.userData.missiles, 12);
         updateHUD();
-        showMessage(`+${p.userData.missiles} MISSILES!`, 1400);
+        showMessage(`+${p.userData.missiles} MISSILES!`, 1400); playSound('pickup');
       }
       scene.remove(p);
       SPACE_PICKUPS.splice(i, 1);
@@ -8267,6 +8432,7 @@ function checkDoorTransition() {
 function victoryGame() {
   transitioning = true;
   STATE.gameover = true;  // freeze gameplay
+  playSound('victory');
   try { document.exitPointerLock(); } catch (e) { /* no-op on touch */ }
   hideAllOverlaysExceptGameOver();
   TOUCH.moveX = 0; TOUCH.moveZ = 0; TOUCH.lookX = 0; TOUCH.lookY = 0;
@@ -8456,7 +8622,7 @@ function updateEnemies(dt) {
       // Contact ram damage
       if (dist < 1.4) {
         e.userData.attackTimer = Math.max(e.userData.attackTimer, 0.9);
-        damagePlayer(14);
+        damagePlayer(14, e.position);
         e.position.addScaledVector(to, -0.6);
       }
       continue;
@@ -8519,7 +8685,7 @@ function updateEnemies(dt) {
         e.userData.attackTimer = (e.userData.attackTimer || 0) - dt;
         if (e.userData.attackTimer <= 0) {
           e.userData.attackTimer = 1.4;
-          damagePlayer(8);
+          damagePlayer(8, e.position);
         }
       }
       continue;
@@ -8653,7 +8819,7 @@ function updateEnemies(dt) {
       e.userData.attackTimer -= dt;
       if (e.userData.attackTimer <= 0 && dist < 1.7) {
         e.userData.attackTimer = 1.3;
-        damagePlayer(16);
+        damagePlayer(16, e.position);
       }
       continue;
     }
@@ -8694,7 +8860,7 @@ function updateEnemies(dt) {
       e.userData.attackTimer -= dt;
       if (e.userData.attackTimer <= 0 && dist < 2.0) {
         e.userData.attackTimer = 1.4;
-        damagePlayer(18);
+        damagePlayer(18, e.position);
       }
 
       // Keep martians out of cracks too — push them out of the rectangle
@@ -8813,7 +8979,7 @@ function updateEnemies(dt) {
       // Contact ram damage
       if (dist < 1.5) {
         e.userData.attackTimer = Math.max(e.userData.attackTimer, 1.0);
-        damagePlayer(20);
+        damagePlayer(20, e.position);
         // Knock ship back so it doesn't keep ramming every frame
         e.position.addScaledVector(to, -2);
       }
@@ -8854,7 +9020,7 @@ function updateEnemies(dt) {
     e.userData.attackTimer -= dt;
     if (e.userData.attackTimer <= 0 && dist < 1.5) {
       e.userData.attackTimer = 1.5;
-      damagePlayer(e.userData.isShark ? 18 : e.userData.isPirate ? 20 : 15);
+      damagePlayer(e.userData.isShark ? 18 : e.userData.isPirate ? 20 : 15, e.position);
     }
 
     if (e.userData.isPirate) {
@@ -8892,13 +9058,16 @@ function updateEnemies(dt) {
   }
 }
 
-function damagePlayer(amount) {
+function damagePlayer(amount, sourcePos) {
   STATE.health = Math.max(0, STATE.health - amount);
   updateHUD();
+  playSound('hurt');
   // Screen flash red
   const hud = document.getElementById('hud');
   hud.style.background = 'rgba(255,0,0,0.25)';
   setTimeout(() => { hud.style.background = 'transparent'; }, 150);
+  // Directional indicator if we know where the hit came from
+  if (sourcePos) showDamageIndicator(sourcePos);
 
   if (STATE.health <= 0) gameOver();
 }
@@ -9151,6 +9320,21 @@ function updateAtmosphere(dt) {
 // ─── HUD ──────────────────────────────────────────────────────────────────────
 function updateHUD() {
   document.getElementById('health-fill').style.width = STATE.health + '%';
+  // Low-health pulse on the health bar
+  const healthBar = document.getElementById('health-bar');
+  if (healthBar) healthBar.classList.toggle('low', STATE.health > 0 && STATE.health <= 30);
+  // Low-ammo pulse on the currently-relevant ammo display
+  const lowOn = (id, count, threshold) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('low', count > 0 && count <= threshold);
+  };
+  lowOn('bones-display',    STATE.bones,    5);
+  lowOn('diamonds-display', STATE.diamonds, 4);
+  lowOn('lasers-display',   STATE.lasers,   8);
+  lowOn('dirt-display',     STATE.dirt,     4);
+  lowOn('missiles-display', STATE.missiles, 2);
+  lowOn('nails-display',    STATE.nails,    8);
+  lowOn('spikes-display',   STATE.spikes,   6);
   document.getElementById('bone-count').textContent = STATE.bones;
   const diaEl = document.getElementById('diamond-count');
   if (diaEl) diaEl.textContent = STATE.diamonds;
@@ -9334,6 +9518,7 @@ function showMessage(text, duration = 2000) {
 
 function gameOver() {
   STATE.gameover = true;
+  playSound('death');
   try { document.exitPointerLock(); } catch (e) { /* no-op on touch */ }
   // Hide everything that could obscure the game-over overlay on mobile
   hideAllOverlaysExceptGameOver();
@@ -9879,6 +10064,7 @@ function loop() {
   updateAtmosphere(dt);
   updateSpaceProgress(dt);
   updateSpawner(dt);
+  updateEnemyMarkers();
   checkDoorTransition();
 
   renderer.render(scene, camera);
