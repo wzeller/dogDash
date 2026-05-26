@@ -46,7 +46,7 @@ const STATE = {
 };
 const DUNGEON_ROOMS = 3;       // rooms 1..3 are dungeon
 const OCEAN_LEVELS = ['ocean-surface', 'ocean-underwater', 'pirate-ship']; // rooms 4..6
-const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface']; // rooms 7..13
+const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface', 'jupiter-surface', 'cat-ship-hijack']; // rooms 7..15
 const OCEAN_BOUND = 18;
 const UNDERWATER_BOUND = 22;
 const SHIP_BOUND_X = 4.5;       // pirate ship deck half-width
@@ -58,6 +58,7 @@ const PLUTO_BOUND = 22;         // pluto surface: large ice plain
 const NEPTUNE_BOUND = 24;       // neptune surface: ruined city plaza
 const URANUS_BOUND  = 22;       // uranus surface: alien outpost
 const SATURN_BOUND  = 24;       // saturn surface: red gas plain
+const JUPITER_BOUND = 26;       // jupiter surface: stormy cloud deck
 
 function levelForRoom(n) {
   if (n <= DUNGEON_ROOMS) return 'dungeon';
@@ -84,6 +85,8 @@ function levelLabel(level, roomNum) {
   if (level === 'uranus-surface') return 'URANUS';
   if (level === 'saturn-approach') return 'TO SATURN';
   if (level === 'saturn-surface') return 'SATURN';
+  if (level === 'jupiter-surface') return 'JUPITER';
+  if (level === 'cat-ship-hijack') return 'CAT SHIP';
   return '?';
 }
 function levelBounds(level) {
@@ -97,6 +100,8 @@ function levelBounds(level) {
   if (level === 'uranus-surface') return [URANUS_BOUND, URANUS_BOUND];
   if (level === 'saturn-approach') return [SPACE_BOUND_X, SPACE_BOUND_Z];
   if (level === 'saturn-surface') return [SATURN_BOUND, SATURN_BOUND];
+  if (level === 'jupiter-surface') return [JUPITER_BOUND, JUPITER_BOUND];
+  if (level === 'cat-ship-hijack') return [SPACE_BOUND_X, SPACE_BOUND_Z];   // small cockpit
   return [DUNGEON_BOUND, DUNGEON_BOUND];
 }
 
@@ -3184,6 +3189,550 @@ function updateSaturnWind(dt) {
   }
 }
 
+// ─── Jupiter Surface: stormy cloud deck + tennis balls + bite weapon ────────
+const JUPITER_DIG = { mesh: null, active: false };
+const jupiterWind = { dirX: 1, dirZ: 0, mag: 0, phase: 0, gustTimer: 0 };
+
+function buildJupiterSurface() {
+  // Cloud-deck "ground" — Jovian banded swirls
+  const groundGeo = new THREE.PlaneGeometry(80, 80, 50, 50);
+  const groundMat = new THREE.MeshStandardMaterial({
+    color: 0xc06a30, roughness: 0.85, metalness: 0.05,
+    emissive: 0x602010, emissiveIntensity: 0.5,
+  });
+  // Bumpy upper deck
+  const pos = groundGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i);
+    pos.setZ(i,
+      Math.sin(x * 0.3) * 0.4 + Math.cos(y * 0.5) * 0.3 +
+      Math.sin(x * 0.12 + y * 0.18) * 0.7 +
+      (Math.random() - 0.5) * 0.15
+    );
+  }
+  groundGeo.computeVertexNormals();
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // Jovian latitude bands — alternating cream and rust streaks across the deck
+  const bandColors = [0xf0d0a0, 0xb05030, 0xfff0c0, 0x90402a, 0xe8b070];
+  for (let i = 0; i < 24; i++) {
+    const yz = -28 + (i / 24) * 56;
+    const cidx = i % bandColors.length;
+    const band = new THREE.Mesh(
+      new THREE.PlaneGeometry(60, 1.6 + Math.random() * 1.2),
+      new THREE.MeshBasicMaterial({ color: bandColors[cidx], transparent: true, opacity: 0.32 })
+    );
+    band.rotation.x = -Math.PI / 2;
+    band.position.set((Math.random() - 0.5) * 6, 0.05, yz);
+    scene.add(band);
+    scene.userData.jupiterBands = scene.userData.jupiterBands || [];
+    scene.userData.jupiterBands.push(band);
+  }
+
+  // The Great Red Spot looming on the horizon (a slowly rotating disc in the sky)
+  const spot = new THREE.Mesh(
+    new THREE.CircleGeometry(8, 48),
+    new THREE.MeshBasicMaterial({ color: 0x8a2010, transparent: true, opacity: 0.85, fog: false })
+  );
+  spot.position.set(-15, 14, -45);
+  scene.add(spot);
+  const spotRing = new THREE.Mesh(
+    new THREE.RingGeometry(7.5, 8.4, 64),
+    new THREE.MeshBasicMaterial({ color: 0xff5028, transparent: true, opacity: 0.7, side: THREE.DoubleSide, fog: false })
+  );
+  spotRing.position.copy(spot.position);
+  scene.add(spotRing);
+  scene.userData.greatRedSpot = spot;
+  scene.userData.greatRedSpotRing = spotRing;
+  // Storm core (lighter centre)
+  const spotEye = new THREE.Mesh(
+    new THREE.CircleGeometry(2.0, 36),
+    new THREE.MeshBasicMaterial({ color: 0xf0a060, transparent: true, opacity: 0.7, fog: false })
+  );
+  spotEye.position.set(-15, 14, -44.8);
+  scene.add(spotEye);
+
+  // Sky dome (warm rust + cream gradient via two hemispheres of color)
+  const sky = new THREE.Mesh(
+    new THREE.SphereGeometry(90, 28, 18),
+    new THREE.MeshBasicMaterial({ color: 0x804020, side: THREE.BackSide, fog: false })
+  );
+  scene.add(sky);
+
+  // Drifting cloud puffs at varying altitudes
+  const puffMat = new THREE.MeshStandardMaterial({
+    color: 0xf0c890, transparent: true, opacity: 0.55,
+    roughness: 0.9, emissive: 0x402010, emissiveIntensity: 0.4,
+  });
+  for (let i = 0; i < 16; i++) {
+    const r = 1.2 + Math.random() * 1.8;
+    const puff = new THREE.Mesh(new THREE.SphereGeometry(r, 14, 10), puffMat);
+    puff.position.set(
+      (Math.random() - 0.5) * 60,
+      4 + Math.random() * 12,
+      (Math.random() - 0.5) * 60,
+    );
+    puff.scale.y = 0.4;
+    scene.add(puff);
+    scene.userData.jupiterPuffs = scene.userData.jupiterPuffs || [];
+    scene.userData.jupiterPuffs.push(puff);
+  }
+
+  // Wind streaks at deck level
+  const windGeo = new THREE.BufferGeometry();
+  const WIND_COUNT = 250;
+  const windPos = new Float32Array(WIND_COUNT * 3);
+  for (let i = 0; i < WIND_COUNT; i++) {
+    windPos[i*3 + 0] = (Math.random() - 0.5) * 70;
+    windPos[i*3 + 1] = 0.4 + Math.random() * 4;
+    windPos[i*3 + 2] = (Math.random() - 0.5) * 70;
+  }
+  windGeo.setAttribute('position', new THREE.BufferAttribute(windPos, 3));
+  const windPoints = new THREE.Points(
+    windGeo,
+    new THREE.PointsMaterial({
+      color: 0xffd0a0, size: 0.18, sizeAttenuation: true,
+      transparent: true, opacity: 0.75, fog: true,
+    })
+  );
+  scene.add(windPoints);
+  scene.userData.jupiterWindParticles = windPoints;
+
+  // Lightning flash placeholder
+  const flash = new THREE.PointLight(0xffe0c0, 0.4, 80, 1);
+  flash.position.set(0, 30, 0);
+  scene.add(flash);
+  scene.userData.jupiterFlash = flash;
+
+  // Lighting
+  const amb = new THREE.AmbientLight(0xffa860, 1.0);
+  scene.add(amb);
+  scene.userData.ambient = amb;
+  const sun = new THREE.DirectionalLight(0xffe0a0, 0.8);
+  sun.position.set(15, 25, 5);
+  scene.add(sun);
+  const hemi = new THREE.HemisphereLight(0xffd090, 0x402010, 0.9);
+  scene.add(hemi);
+
+  // Initial wind state
+  jupiterWind.dirX = 0.7;
+  jupiterWind.dirZ = 0.7;
+  jupiterWind.mag = 0.9;
+  jupiterWind.phase = 0;
+  jupiterWind.gustTimer = 3;
+  JUPITER_DIG.mesh = null;
+  JUPITER_DIG.active = false;
+}
+
+// Spawn the glowing dig spot once tennis balls are cleared.
+function buildJupiterDigSpot() {
+  const g = new THREE.Group();
+  // Crater rim
+  const rim = new THREE.Mesh(
+    new THREE.TorusGeometry(1.6, 0.25, 12, 36),
+    new THREE.MeshStandardMaterial({ color: 0x603020, roughness: 0.7, emissive: 0x301008, emissiveIntensity: 0.6 })
+  );
+  rim.rotation.x = Math.PI / 2;
+  rim.position.y = 0.15;
+  g.add(rim);
+  // Glowing core
+  const core = new THREE.Mesh(
+    new THREE.CircleGeometry(1.4, 36),
+    new THREE.MeshBasicMaterial({ color: 0xffd060, transparent: true, opacity: 0.85, side: THREE.DoubleSide })
+  );
+  core.rotation.x = -Math.PI / 2;
+  core.position.y = 0.02;
+  g.add(core);
+  // Hot rising sparks (just a glow)
+  const glow = new THREE.PointLight(0xff8040, 2.2, 8, 2);
+  glow.position.y = 1;
+  g.add(glow);
+  g.userData.glow = glow;
+  g.userData.core = core;
+  // Place it near the center of the plain, somewhere visible
+  g.position.set(4, 0, -3);
+  scene.add(g);
+  JUPITER_DIG.mesh = g;
+  JUPITER_DIG.active = true;
+}
+
+// ─── Enemy: Giant Tennis Ball ────────────────────────────────────────────────
+function spawnTennisBall(x, z) {
+  const t = new THREE.Group();
+  const feltMat = new THREE.MeshStandardMaterial({
+    color: 0xd0e840, roughness: 0.95, metalness: 0.0,
+    emissive: 0x303808, emissiveIntensity: 0.35,
+  });
+  const seamMat = new THREE.MeshBasicMaterial({ color: 0xfff8e0 });
+
+  const R = 0.85;
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(R, 22, 16), feltMat);
+  t.add(ball);
+
+  // Two curved white seams — built as thin tori half-rings, offset like real tennis ball seams
+  for (let sign of [-1, 1]) {
+    const seam = new THREE.Mesh(
+      new THREE.TorusGeometry(R * 0.96, 0.045, 8, 36, Math.PI * 1.05),
+      seamMat
+    );
+    seam.rotation.x = Math.PI / 2;
+    seam.rotation.y = sign > 0 ? 0.45 : Math.PI + 0.45;
+    seam.position.y = sign * 0.0;
+    t.add(seam);
+  }
+
+  // Fuzzy halo (slightly larger transparent sphere for the "fuzz" silhouette)
+  const fuzz = new THREE.Mesh(
+    new THREE.SphereGeometry(R * 1.06, 18, 12),
+    new THREE.MeshBasicMaterial({ color: 0xe0f060, transparent: true, opacity: 0.18, side: THREE.BackSide })
+  );
+  t.add(fuzz);
+
+  t.position.set(x, R, z);
+  t.userData.health = 100;             // 2 bites at 55 dmg
+  t.userData.speed = 4.2 + Math.random() * 1.2;   // chase speed (faster than walk)
+  t.userData.bobOffset = Math.random() * Math.PI * 2;
+  t.userData.isTennisBall = true;
+  t.userData.bounceVy = 0;             // vertical velocity for bouncing
+  t.userData.spin = Math.random() * Math.PI * 2;
+  t.userData.hitOffsetY = R;
+  t.userData.hitRadius = R + 0.1;
+
+  scene.add(t);
+  ENEMIES.push(t);
+  return t;
+}
+
+// ─── Bite weapon (Jupiter surface) ───────────────────────────────────────────
+function biteAttack() {
+  if (STATE.gameover) return;
+  // Find nearest enemy in front of player, within bite range.
+  const BITE_RANGE = 2.2;
+  const BITE_HALF_CONE = Math.cos(Math.PI / 3);   // 60° cone (cos 60 = 0.5)
+  const dir = camera.getWorldDirection(SCRATCH.vA);
+  let best = null, bestDist = BITE_RANGE;
+  for (const e of ENEMIES) {
+    const dx = e.position.x - camera.position.x;
+    const dz = e.position.z - camera.position.z;
+    const dist = Math.sqrt(dx*dx + dz*dz);
+    if (dist > BITE_RANGE) continue;
+    const dot = (dx * dir.x + dz * dir.z) / (dist || 1);
+    if (dot < BITE_HALF_CONE) continue;    // not in front
+    if (dist < bestDist) { bestDist = dist; best = e; }
+  }
+  // Animate the held item (snap forward)
+  animateBite();
+  if (!best) return;
+  best.userData.health -= 55;
+  // Brief recoil/push so the ball bounces away
+  const away = SCRATCH.vB.set(best.position.x - camera.position.x, 0, best.position.z - camera.position.z).normalize();
+  best.position.x += away.x * 0.6;
+  best.position.z += away.z * 0.6;
+  best.userData.bounceVy = Math.max(best.userData.bounceVy, 6);
+  // Death + a poof of yellow felt particles
+  if (best.userData.health <= 0) {
+    spawnTennisBallPop(best.position.clone());
+    const idx = ENEMIES.indexOf(best);
+    if (idx !== -1) killEnemy(idx);
+  } else {
+    flashEnemy(best);
+  }
+}
+
+function animateBite() {
+  if (!dogBoneHeld) return;
+  const baseZ = dogBoneHeld.position.z || 0;
+  let t = 0;
+  const anim = () => {
+    t += 0.08;
+    dogBoneHeld.position.z = baseZ - Math.sin(t * Math.PI) * 0.18;
+    if (t < 1) requestAnimationFrame(anim);
+    else dogBoneHeld.position.z = baseZ;
+  };
+  requestAnimationFrame(anim);
+}
+
+function spawnTennisBallPop(pos) {
+  const mat = new THREE.MeshBasicMaterial({ color: 0xd0e840 });
+  for (let i = 0; i < 14; i++) {
+    const p = new THREE.Mesh(new THREE.SphereGeometry(0.08, 5, 4), mat);
+    p.position.copy(pos).add(new THREE.Vector3(
+      (Math.random() - 0.5) * 0.6,
+      Math.random() * 0.6,
+      (Math.random() - 0.5) * 0.6,
+    ));
+    p.userData.vel = new THREE.Vector3(
+      (Math.random() - 0.5) * 4,
+      Math.random() * 5 + 2,
+      (Math.random() - 0.5) * 4,
+    );
+    p.userData.life = 0.7;
+    scene.add(p);
+    scene.userData.particles = scene.userData.particles || [];
+    scene.userData.particles.push(p);
+  }
+}
+
+// Replace the held item with a "fangs" indicator on Jupiter
+function swapHeldToFangs() {
+  if (!dogArm || !dogBoneHeld) return;
+  dogArm.remove(dogBoneHeld);
+  const g = new THREE.Group();
+  // Two small fang triangles peeking up at the bottom of the view
+  const fangMat = new THREE.MeshStandardMaterial({ color: 0xfff8e0, roughness: 0.6, emissive: 0x602010 });
+  for (const sx of [-0.06, 0.06]) {
+    const fang = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.12, 6), fangMat);
+    fang.rotation.x = Math.PI;
+    fang.position.set(sx, -0.02, 0);
+    g.add(fang);
+  }
+  // Pink tongue / mouth interior hint
+  const tongue = new THREE.Mesh(
+    new THREE.SphereGeometry(0.09, 12, 8),
+    new THREE.MeshStandardMaterial({ color: 0xff7090, roughness: 0.6, emissive: 0x401020 })
+  );
+  tongue.scale.set(1.0, 0.4, 0.55);
+  tongue.position.set(0, -0.12, -0.02);
+  g.add(tongue);
+  g.position.set(0.0, -0.18, -0.02);
+  dogArm.add(g);
+  dogBoneHeld = g;
+}
+
+// Wind + storm update (called each frame in updateAtmosphere)
+function updateJupiterStorm(dt) {
+  if (STATE.level !== 'jupiter-surface') return;
+  const t = clock.getElapsedTime();
+  jupiterWind.phase += dt * 0.2;
+  jupiterWind.gustTimer -= dt;
+  let gust = 0;
+  if (jupiterWind.gustTimer <= 0) {
+    jupiterWind.gustTimer = 3.5 + Math.random() * 4;
+    if (Math.random() < 0.55) showMessage('A JOVIAN GUST! 🌪️', 1100);
+  }
+  const sinceGust = (3.5 + 4) - jupiterWind.gustTimer;
+  if (sinceGust < 1.4) gust = 2.2 * (1 - sinceGust / 1.4);
+  jupiterWind.dirX = Math.cos(jupiterWind.phase);
+  jupiterWind.dirZ = Math.sin(jupiterWind.phase);
+  jupiterWind.mag = 0.9 + gust;
+  camera.position.x += jupiterWind.dirX * jupiterWind.mag * dt;
+  camera.position.z += jupiterWind.dirZ * jupiterWind.mag * dt;
+  const [BX, BZ] = levelBounds(STATE.level);
+  camera.position.x = Math.max(-BX, Math.min(BX, camera.position.x));
+  camera.position.z = Math.max(-BZ, Math.min(BZ, camera.position.z));
+
+  // Drift the wind particle cloud
+  const wp = scene.userData.jupiterWindParticles;
+  if (wp) {
+    const pos = wp.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      let x = pos.getX(i) + jupiterWind.dirX * jupiterWind.mag * 10 * dt;
+      let z = pos.getZ(i) + jupiterWind.dirZ * jupiterWind.mag * 10 * dt;
+      if (x >  35) x -= 70;
+      if (x < -35) x += 70;
+      if (z >  35) z -= 70;
+      if (z < -35) z += 70;
+      pos.setX(i, x);
+      pos.setZ(i, z);
+    }
+    pos.needsUpdate = true;
+  }
+  // Bands drift slowly
+  const bands = scene.userData.jupiterBands;
+  if (bands) {
+    for (const b of bands) {
+      b.position.x += jupiterWind.dirX * jupiterWind.mag * 0.8 * dt;
+      if (b.position.x >  30) b.position.x -= 60;
+      if (b.position.x < -30) b.position.x += 60;
+    }
+  }
+  // Cloud puffs drift overhead
+  const puffs = scene.userData.jupiterPuffs;
+  if (puffs) {
+    for (const p of puffs) {
+      p.position.x += jupiterWind.dirX * jupiterWind.mag * 0.4 * dt;
+      p.position.z += jupiterWind.dirZ * jupiterWind.mag * 0.4 * dt;
+      if (p.position.x >  35) p.position.x -= 70;
+      if (p.position.x < -35) p.position.x += 70;
+      if (p.position.z >  35) p.position.z -= 70;
+      if (p.position.z < -35) p.position.z += 70;
+    }
+  }
+  // Great Red Spot slow rotation
+  if (scene.userData.greatRedSpotRing) scene.userData.greatRedSpotRing.rotation.z = t * 0.15;
+  // Lightning
+  const flash = scene.userData.jupiterFlash;
+  if (flash) {
+    const strike = Math.sin(t * 0.5) * Math.sin(t * 1.9) > 0.91;
+    flash.intensity = strike ? 5.5 + Math.random() * 3 : 0.4 + Math.sin(t * 2) * 0.15;
+  }
+  // Dig spot pulse
+  if (JUPITER_DIG.mesh) {
+    JUPITER_DIG.mesh.rotation.y += dt * 0.6;
+    if (JUPITER_DIG.mesh.userData.glow) {
+      JUPITER_DIG.mesh.userData.glow.intensity = 1.6 + Math.sin(t * 4) * 0.8;
+    }
+    if (JUPITER_DIG.mesh.userData.core) {
+      JUPITER_DIG.mesh.userData.core.material.opacity = 0.6 + Math.sin(t * 4) * 0.3;
+    }
+  }
+}
+
+// Update tennis-ball behavior (chase/bounce/flee). Called from updateEnemies.
+function updateTennisBall(e, dt, t) {
+  // XZ vector toward player
+  const to = SCRATCH.vA.set(camera.position.x - e.position.x, 0, camera.position.z - e.position.z);
+  const dist = to.length();
+  if (dist > 0.001) to.multiplyScalar(1 / dist);
+
+  // Behavior: bolt AWAY when too close (just been bitten), chase when far
+  let moveDir;
+  if (dist < 2.5) {
+    moveDir = to.clone().multiplyScalar(-1);   // flee a little
+  } else if (dist < 18) {
+    moveDir = to;                              // chase
+  } else {
+    moveDir = to;                              // close in
+  }
+  e.position.x += moveDir.x * e.userData.speed * dt;
+  e.position.z += moveDir.z * e.userData.speed * dt;
+
+  // Bouncing: gravity-like vertical motion with ground bounce
+  e.userData.bounceVy -= 18 * dt;
+  e.position.y += e.userData.bounceVy * dt;
+  const restY = e.userData.hitRadius || 0.95;
+  if (e.position.y < restY) {
+    e.position.y = restY;
+    // Bounce with energy loss; occasionally hop on its own
+    if (e.userData.bounceVy < -0.5) {
+      e.userData.bounceVy = -e.userData.bounceVy * 0.7;
+    } else if (Math.random() < 0.02) {
+      e.userData.bounceVy = 4 + Math.random() * 3;
+    } else {
+      e.userData.bounceVy = 0;
+    }
+  }
+
+  // Spin while moving
+  e.userData.spin += dt * 6;
+  e.rotation.x = e.userData.spin;
+  e.rotation.z = Math.sin(t + e.userData.bobOffset) * 0.3;
+}
+
+// ─── Cat Ship Hijack (room 15) ───────────────────────────────────────────────
+function buildCatShipHijack() {
+  // Re-use the cockpit shell as the base
+  buildSpaceCockpit();
+  // Replace Pluto with… nothing in particular; we'll cover with overlay quickly
+  if (scene.userData.pluto) scene.userData.pluto.visible = false;
+  if (scene.userData.charon) scene.userData.charon.visible = false;
+
+  // Add cat-themed decorations to the cockpit
+  const cockpit = scene.userData.cockpit;
+  if (cockpit) {
+    // Big cat ear silhouettes on top of the dashboard frame
+    const earMat = new THREE.MeshStandardMaterial({ color: 0x2a1a1a, roughness: 0.8 });
+    for (const sx of [-1, 1]) {
+      const ear = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.45, 6), earMat);
+      ear.position.set(sx * 1.6, 1.95, -0.9);
+      ear.rotation.z = sx * 0.2;
+      cockpit.add(ear);
+    }
+    // Glowing cat eye sigil over the dashboard center
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffe060 });
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.18, 16, 12), eyeMat);
+    eye.scale.set(1, 1.6, 0.4);
+    eye.position.set(0, 1.55, -0.85);
+    cockpit.add(eye);
+    const pupil = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 12, 8),
+      new THREE.MeshBasicMaterial({ color: 0x000000 })
+    );
+    pupil.scale.set(0.4, 1.8, 0.5);
+    pupil.position.set(0, 1.55, -0.78);
+    cockpit.add(pupil);
+  }
+
+  // Bars across the viewport — you are CAGED in the cat ship at start
+  const barsGroup = new THREE.Group();
+  const barMat = new THREE.MeshStandardMaterial({ color: 0x3a3a3a, metalness: 0.8, roughness: 0.4 });
+  for (let i = -2; i <= 2; i++) {
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.4, 8), barMat);
+    bar.position.set(i * 0.5, 1.25, -0.95);
+    barsGroup.add(bar);
+  }
+  scene.add(barsGroup);
+  scene.userData.cageBars = barsGroup;
+
+  // No stars/streaks scrolling — we're docked in the cat ship
+  if (scene.userData.stars) scene.userData.stars.visible = false;
+  if (scene.userData.streaks) scene.userData.streaks.visible = false;
+}
+
+function startCatShipHijackSequence() {
+  // Phase 1: stuck. Phase 2: cage breaks. Phase 3: fighter takes off. Phase 4: fade to victory.
+  showMessage('YOU\'RE IN A CAT SHIP CAGE… 😾', 2800);
+  const overlay = document.getElementById('transition-overlay');
+
+  setTimeout(() => {
+    showMessage('YOU CHEW THROUGH THE BARS! 🦷', 2800);
+    const bars = scene.userData.cageBars;
+    if (bars) {
+      for (const bar of bars.children) {
+        bar.userData.fallVel = (Math.random() - 0.5) * 3;
+        bar.userData.gravVy = 0;
+      }
+      scene.userData.barsFalling = true;
+    }
+  }, 3000);
+
+  setTimeout(() => {
+    showMessage('HIJACK! YOU ARE THE FIGHTER NOW! 🚀😼', 3000);
+    if (scene.userData.stars) scene.userData.stars.visible = true;
+    if (scene.userData.streaks) scene.userData.streaks.visible = true;
+    if (scene.userData.pluto) {
+      scene.userData.pluto.visible = true;
+      scene.userData.pluto.position.z = -120;
+      // Re-skin to a generic alien planet
+      scene.userData.pluto.material.color.setHex(0x6080a0);
+      scene.userData.pluto.material.emissive.setHex(0x102030);
+      scene.userData.pluto.material.needsUpdate = true;
+    }
+    scene.userData.spacePhase = 'fight';
+  }, 6000);
+
+  setTimeout(() => {
+    showMessage('LIGHTSPEED ENGAGED 🌌', 2500);
+    scene.userData.spacePhase = 'approach';
+  }, 9000);
+
+  setTimeout(() => {
+    overlay.style.background = '#fff';
+    overlay.style.opacity = '0';
+    setTimeout(() => { overlay.style.opacity = '1'; }, 600);
+    setTimeout(() => {
+      overlay.style.background = '#000';
+      victoryGame();
+    }, 1400);
+  }, 11500);
+}
+
+function updateCatShipHijack(dt) {
+  if (STATE.level !== 'cat-ship-hijack') return;
+  // Drop the cage bars after the player chews through
+  if (scene.userData.barsFalling && scene.userData.cageBars) {
+    for (const bar of scene.userData.cageBars.children) {
+      bar.userData.gravVy = (bar.userData.gravVy || 0) - 18 * dt;
+      bar.position.y += bar.userData.gravVy * dt;
+      bar.position.x += (bar.userData.fallVel || 0) * dt;
+      bar.rotation.z += dt * 2;
+    }
+  }
+}
+
 // ─── Laser Projectile (space) ────────────────────────────────────────────────
 const laserMat = persistMat(new THREE.MeshBasicMaterial({ color: 0x60ffff }));
 
@@ -3733,6 +4282,8 @@ function swapHeldToBone() {
 function throwAmmo() {
   if (STATE.level === 'neptune-surface') return throwDirt();
   if (STATE.level === 'saturn-surface') return throwNail();
+  if (STATE.level === 'jupiter-surface') return biteAttack();
+  if (STATE.level === 'cat-ship-hijack') return;   // can't fire during hijack cinematic
   if (isSpaceLike(STATE.level)) return throwLaser();
   if (isOceanLike(STATE.level)) return throwDiamond();
   return throwBone();
@@ -5157,9 +5708,41 @@ function triggerJupiterArrival() {
   overlay.style.opacity = '0';
   setTimeout(() => { overlay.style.opacity = '1'; }, 700);
   setTimeout(() => {
-    overlay.style.background = '#000';
-    victoryGame();   // jupiter-themed final screen (see victoryGame)
+    overlay.style.background = '#000';   // reset for loadNextRoom's own fade
+    transitioning = false;
+    loadNextRoom();                       // → room 14 = jupiter-surface
   }, 1700);
+}
+
+function triggerJupiterDig() {
+  transitioning = true;
+  document.exitPointerLock();
+  showMessage('DIGGING DOWN INTO JUPITER… ⛏️', 2600);
+
+  // Camera descends into the dig spot (simulated by dropping camera y over ~1.5s)
+  const start = performance.now();
+  const startY = camera.position.y;
+  const drop = () => {
+    const tt = Math.min(1, (performance.now() - start) / 1500);
+    camera.position.y = startY - tt * 4.5;     // sink ~4.5m below surface
+    camera.rotation.x = -tt * 0.6;             // tilt head down as we sink
+    if (tt < 1) requestAnimationFrame(drop);
+  };
+  requestAnimationFrame(drop);
+
+  // Brief orange flash (lava-light through cracks), then portal flash white, then cat ship
+  const overlay = document.getElementById('transition-overlay');
+  overlay.style.background = '#ff8030';
+  overlay.style.opacity = '0';
+  setTimeout(() => { overlay.style.opacity = '1'; }, 1300);
+  setTimeout(() => {
+    overlay.style.background = '#e0d0ff';      // portal flash
+  }, 1900);
+  setTimeout(() => {
+    overlay.style.background = '#000';         // reset for loadNextRoom's own fade
+    transitioning = false;
+    loadNextRoom();                            // → room 15 = cat-ship-hijack
+  }, 2400);
 }
 
 function triggerNeptuneLanding() {
@@ -5276,6 +5859,10 @@ function checkDoorTransition() {
       // Water-gun aliens defeated — Jupiter portal opens
       buildJupiterPortal();
       showMessage('WATER GUNS BROKEN! A JUPITER PORTAL APPEARS! 🌀', 4500);
+    } else if (STATE.level === 'jupiter-surface') {
+      // Tennis balls down — a glowing dig spot opens up in the clouds
+      buildJupiterDigSpot();
+      showMessage('TENNIS BALLS POPPED! A DIG SITE APPEARS — DIG DOWN! ⛏️', 4500);
     } else if (isOceanLike(STATE.level)) {
       portalActive = true;
       const ring = scene.userData.portalRing;
@@ -5324,6 +5911,13 @@ function checkDoorTransition() {
         if (!transitioning) triggerJupiterArrival();
       }
     }
+  } else if (STATE.level === 'jupiter-surface') {
+    // Walk into the dig site to descend → cat ship
+    if (JUPITER_DIG.active && JUPITER_DIG.mesh && !transitioning) {
+      const dx = camera.position.x - JUPITER_DIG.mesh.position.x;
+      const dz = camera.position.z - JUPITER_DIG.mesh.position.z;
+      if (Math.sqrt(dx*dx + dz*dz) < 1.6) triggerJupiterDig();
+    }
   } else if (isSpaceLike(STATE.level)) {
     // No portal — handled in updateSpaceProgress (drives crash/landing sequence)
   } else if (isOceanLike(STATE.level)) {
@@ -5356,7 +5950,15 @@ function victoryGame() {
   const t = document.getElementById('victory-title');
   const s1 = document.getElementById('victory-sub1');
   const s2 = document.getElementById('victory-sub2');
-  if (STATE.level === 'saturn-surface') {
+  if (STATE.level === 'cat-ship-hijack') {
+    if (t) t.textContent = 'HIJACKED!';
+    if (s1) s1.textContent = 'YOU ARE THE FIGHTER NOW — COSMIC GOOD BOY';
+    if (s2) s2.textContent = `…the next chapter is coming • ${STATE.diamonds} 💎`;
+  } else if (STATE.level === 'jupiter-surface') {
+    if (t) t.textContent = 'JUPITER!';
+    if (s1) s1.textContent = 'DUG INTO THE GAS GIANT';
+    if (s2) s2.textContent = `…cat ships await below • ${STATE.diamonds} 💎`;
+  } else if (STATE.level === 'saturn-surface') {
     if (t) t.textContent = 'JUPITER!';
     if (s1) s1.textContent = 'PORTAL CROSSED • THE BIGGEST PLANET AWAITS';
     if (s2) s2.textContent = `…the great red spot in the next update • ${STATE.diamonds} 💎`;
@@ -5427,6 +6029,7 @@ function loadNextRoom() {
     DIRT_PICKUPS.length = 0;
     NAIL_PICKUPS.length = 0;
     PLUTO_CRACKS.length = 0;
+    JUPITER_DIG.mesh = null; JUPITER_DIG.active = false;
     scene.userData = {};
     portalActive = false;
 
@@ -5459,6 +6062,8 @@ function loadNextRoom() {
       'uranus-surface':   'URANUS! YOU WERE KIDNAPPED — FIGHT THE GRAY ALIENS! 👽⚡',
       'saturn-approach':  'INTO SATURN\'S RINGS! TIE FIGHTERS! F = MISSILE 🚀⚔️',
       'saturn-surface':   'SATURN STORM! WATER-GUN ALIENS! NAILGUN AT THE READY! 🔨💧',
+      'jupiter-surface':  'JUPITER STORM! CHASE THE TENNIS BALLS — BITE TO DESTROY! 🎾🦷',
+      'cat-ship-hijack':  'TRAPPED IN A CAT SHIP CAGE… 😾',
       'dungeon':          `ROOM ${currentRoom} — SPOOKIER IN HERE...`,
     };
     showMessage(intro[STATE.level] || '', 3500);
@@ -5473,6 +6078,23 @@ function updateEnemies(dt) {
   const onSurface = STATE.level === 'ocean-surface';
   const inSpace = isSpaceLike(STATE.level);
   for (const e of ENEMIES) {
+    if (e.userData.isTennisBall) {
+      updateTennisBall(e, dt, t);
+      // Contact bump: if they ram into the player, push the player a bit
+      const dx = e.position.x - camera.position.x;
+      const dz = e.position.z - camera.position.z;
+      const cdist = Math.sqrt(dx*dx + dz*dz);
+      if (cdist < 1.4) {
+        // Cosmetic damage — not a deadly attack, just a nudge
+        e.userData.attackTimer = (e.userData.attackTimer || 0) - dt;
+        if (e.userData.attackTimer <= 0) {
+          e.userData.attackTimer = 1.4;
+          damagePlayer(8);
+        }
+      }
+      continue;
+    }
+
     if (e.userData.isWaterAlien) {
       // ── Water-gun alien: chase player, spray water blobs ──
       const to = new THREE.Vector3().subVectors(camera.position, e.position);
@@ -6348,6 +6970,7 @@ function rebuildLevel(fromBeginning) {
   DIRT_PICKUPS.length = 0;
   NAIL_PICKUPS.length = 0;
   PLUTO_CRACKS.length = 0;
+  JUPITER_DIG.mesh = null; JUPITER_DIG.active = false;
 
   scene.userData = {};
 
@@ -6494,6 +7117,24 @@ function buildLevel(level) {
     buildSaturnSurface();
     spawnNailPickups(7);
     spawnGroundMedkits(diff().treatBase + 2);
+  } else if (level === 'jupiter-surface') {
+    scene.fog = new THREE.FogExp2(0xc06030, 0.028);
+    renderer.setClearColor(0x804020);
+    camera.position.set(0, PLAYER_HEIGHT, 20);
+    playerYaw = Math.PI;
+    swapHeldToFangs();
+    setSpacesuitVisor(true);
+    buildJupiterSurface();
+    spawnGroundMedkits(diff().treatBase + 2);
+  } else if (level === 'cat-ship-hijack') {
+    scene.fog = null;
+    renderer.setClearColor(0x101820);
+    camera.position.set(0, PLAYER_HEIGHT + 0.4, 0);
+    playerYaw = 0; playerPitch = 0;
+    swapHeldToBone();    // dog is back to mouth-only — about to chew bars
+    setSpacesuitVisor(false);
+    buildCatShipHijack();
+    startCatShipHijackSequence();
   }
 }
 
@@ -6525,6 +7166,8 @@ const DEV_ROOMS = [
   { room: 11, label: 'Room 11 — Uranus (Kidnapped!)' },
   { room: 12, label: 'Room 12 — Saturn Rings (Dogfight)' },
   { room: 13, label: 'Room 13 — Saturn Surface (Storm)' },
+  { room: 14, label: 'Room 14 — Jupiter (Tennis Balls)' },
+  { room: 15, label: 'Room 15 — Cat Ship Hijack' },
 ];
 
 function toggleDevMenu() {
@@ -6576,6 +7219,8 @@ const WAVES_PER_ROOM = 3; // clear 3 waves to unlock the door
 
 function updateSpawner(dt) {
   if (STATE.gameover || roomCleared) return;
+  // Cat ship is a scripted cinematic — no waves
+  if (STATE.level === 'cat-ship-hijack') return;
   // Neptune is a one-and-done boss fight: spawn the boss exactly once
   if (STATE.level === 'neptune-approach') {
     if (waveNumber === 0) {
@@ -6649,6 +7294,13 @@ function updateSpawner(dt) {
         const z = Math.sin(angle) * r;
         spawnWaterAlien(x, z);
         enemyLabel = 'WATER ALIEN';
+      } else if (STATE.level === 'jupiter-surface') {
+        // Giant tennis balls bounce in from the edges
+        const r = 15 + Math.random() * 5;
+        const x = Math.cos(angle) * r;
+        const z = Math.sin(angle) * r;
+        spawnTennisBall(x, z);
+        enemyLabel = 'TENNIS BALL';
       } else if (isSpaceLike(STATE.level)) {
         // Alien ships warp in ahead of the cockpit, spread out
         const x = (Math.random() - 0.5) * 22;
@@ -6706,6 +7358,8 @@ function loop() {
   updateDirtPickups(dt);
   updateNailPickups(dt);
   updateSaturnWind(dt);
+  updateJupiterStorm(dt);
+  updateCatShipHijack(dt);
   updateParticles(dt);
   updateExplosions(dt);
   updateAtmosphere(dt);
