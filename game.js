@@ -5599,6 +5599,9 @@ function buildEarthHouse(side, z, houseColor) {
 function buildProtagonistHome() {
   // Same shape as the others but warmer color, decorated, far end of street.
   const home = buildEarthHouse(-1, -28, 0xc05040);
+  // Block the home's footprint so the player can't walk through their own house.
+  // Box matches the regular-house pattern: side*9 ±2.5 in x, z ±1.8.
+  addLevelBox(-9 - 2.5, -9 + 2.5, -28 - 1.8, -28 + 1.8);
   home.doormat.material.color.setHex(0xd09060);
   home.doormat.material.emissiveIntensity = 0.8;
   home.window.material.emissive.setHex(0xffe0a0);
@@ -6199,12 +6202,23 @@ function buildCatShipHijack() {
   if (scene.userData.streaks) scene.userData.streaks.visible = false;
 }
 
+// Track every setTimeout the cinematic spawns so we can cancel them all if the
+// player warps out of cat-ship-hijack early via dev menu — otherwise their
+// messages and the auto-loadNextRoom() fire on whatever level the player is on.
+const CAT_SHIP_TIMERS = [];
+function clearCatShipTimers() {
+  for (const id of CAT_SHIP_TIMERS) clearTimeout(id);
+  CAT_SHIP_TIMERS.length = 0;
+}
+function scheduleCat(fn, ms) { CAT_SHIP_TIMERS.push(setTimeout(fn, ms)); }
+
 function startCatShipHijackSequence() {
+  clearCatShipTimers();
   // Phase 1: stuck. Phase 2: cage breaks. Phase 3: fighter takes off. Phase 4: fade to victory.
   showMessage('YOU\'RE IN A CAT SHIP CAGE… 😾', 2800);
   const overlay = document.getElementById('transition-overlay');
 
-  setTimeout(() => {
+  scheduleCat(() => {
     showMessage('YOU CHEW THROUGH THE BARS! 🦷', 2800);
     const bars = scene.userData.cageBars;
     if (bars) {
@@ -6216,7 +6230,7 @@ function startCatShipHijackSequence() {
     }
   }, 3000);
 
-  setTimeout(() => {
+  scheduleCat(() => {
     showMessage('HIJACK! YOU ARE THE FIGHTER NOW! 🚀😼', 3000);
     if (scene.userData.stars) scene.userData.stars.visible = true;
     if (scene.userData.streaks) scene.userData.streaks.visible = true;
@@ -6231,18 +6245,20 @@ function startCatShipHijackSequence() {
     scene.userData.spacePhase = 'fight';
   }, 6000);
 
-  setTimeout(() => {
+  scheduleCat(() => {
     showMessage('LIGHTSPEED ENGAGED 🌌', 2500);
     scene.userData.spacePhase = 'approach';
   }, 9000);
 
-  setTimeout(() => {
+  scheduleCat(() => {
     overlay.style.background = '#fff';
     overlay.style.opacity = '0';
-    setTimeout(() => { overlay.style.opacity = '1'; }, 600);
-    setTimeout(() => {
+    scheduleCat(() => { overlay.style.opacity = '1'; }, 600);
+    scheduleCat(() => {
       overlay.style.background = '#000';
       transitioning = false;
+      // Bail out if the player has warped to a different level since
+      if (STATE.level !== 'cat-ship-hijack') return;
       loadNextRoom();   // → room 16 = mars-approach
     }, 1400);
   }, 11500);
@@ -8752,6 +8768,7 @@ function loadNextRoom() {
     EARTH.dogs.length = 0; EARTH.houses.length = 0; EARTH.cars.length = 0;
     EARTH.currentDog = null; EARTH.delivered = 0;
     EARTH.protagonistHome = null; EARTH.finalPathLit = false;
+    clearCatShipTimers();
     clearLevelObstacles();
     scene.userData = {};
     portalActive = false;
@@ -9559,7 +9576,11 @@ function updateHUD() {
   const inOcean = isOceanLike(STATE.level);
   const inSpace = isSpaceLike(STATE.level);
   const isDirtLevel  = STATE.level === 'neptune-surface';
-  const isLaserLevel = inSpace && !isDirtLevel;
+  // Rocket-interior fires bombs only (FIRE opens cages there). Earth has no
+  // weapons at all. Don't advertise lasers on either.
+  const isLaserLevel = inSpace && !isDirtLevel
+    && STATE.level !== 'rocket-interior'
+    && STATE.level !== 'earth';
   const isMissileLevel = STATE.level === 'saturn-approach' || STATE.level === 'rocket-interior';
   const isNailLevel    = STATE.level === 'saturn-surface';
   const isSpikeLevel   = STATE.level === 'jupiter-surface';
@@ -9809,6 +9830,7 @@ function rebuildLevel(fromBeginning) {
   EARTH.protagonistHome = null; EARTH.finalPathLit = false;
   // Fresh-game restart clears the freed-dog roster too
   if (fromBeginning) STATE.freedDogColors = [];
+  clearCatShipTimers();
   clearLevelObstacles();
 
   scene.userData = {};
@@ -9893,7 +9915,8 @@ function buildLevel(level) {
   } else if (level === 'pluto-surface') {
     scene.fog = new THREE.FogExp2(0x081020, 0.02);
     renderer.setClearColor(0x020414);
-    camera.position.set(0, PLAYER_HEIGHT, 16);
+    // Spawn at z=20 to clear the crack at (0,13) with half-length 5.5 (covers z 7.5..18.5)
+    camera.position.set(0, PLAYER_HEIGHT, 20);
     playerYaw = Math.PI;
     swapHeldToBlaster();
     setSpacesuitVisor(true);
@@ -9915,8 +9938,10 @@ function buildLevel(level) {
   } else if (level === 'neptune-surface') {
     scene.fog = new THREE.FogExp2(0x1a2a4a, 0.022);
     renderer.setClearColor(0x1a2a4a);
+    // Spawn at the south edge of the plaza facing -Z so the ruined columns,
+    // toppled statue, and storm sky read on the first frame.
     camera.position.set(0, PLAYER_HEIGHT, 18);
-    playerYaw = Math.PI;
+    playerYaw = 0;
     swapHeldToDirt();
     setSpacesuitVisor(true);
     if (STATE.dirt < 10) STATE.dirt = 18;
@@ -9926,8 +9951,10 @@ function buildLevel(level) {
   } else if (level === 'uranus-surface') {
     scene.fog = new THREE.FogExp2(0x4080a8, 0.022);
     renderer.setClearColor(0x4080a8);
+    // Face -Z so the alien outpost, crystal pylons, and the vertical Uranus
+    // rings overhead are all in the player's view at level entry.
     camera.position.set(0, PLAYER_HEIGHT, 16);
-    playerYaw = Math.PI;
+    playerYaw = 0;
     swapHeldToBlaster();
     setSpacesuitVisor(true);
     if (STATE.lasers < 25) STATE.lasers = 45;
@@ -10011,8 +10038,10 @@ function buildLevel(level) {
   } else if (level === 'earth') {
     scene.fog = new THREE.FogExp2(0x6090b8, 0.015);
     renderer.setClearColor(0x6080a0);
-    camera.position.set(0, PLAYER_HEIGHT, 25);
-    playerYaw = Math.PI;
+    // Spawn south of the dog cluster (z=25) and face north toward houses + home.
+    // playerYaw=0 means the camera faces -Z by default (forward).
+    camera.position.set(0, PLAYER_HEIGHT, 27);
+    playerYaw = 0;
     swapHeldToBone();    // no combat — held bone is just a friendly visual
     setSpacesuitVisor(false);
     buildEarth();
@@ -10093,7 +10122,11 @@ function warpToRoom(roomNum) {
   STATE.level = levelForRoom(roomNum) || 'dungeon';
   // rebuildLevel sets ammo + health based on STATE.level
   rebuildLevel(false);
-  showMessage(`⚡ WARPED TO ${levelLabel(STATE.level, currentRoom)} ⚡`, 2500);
+  // "TO PLUTO" / "TO MARS" etc. read naturally on their own; surface levels
+  // need a verb. Use the label as-is for approach levels, prefix everything else.
+  const lbl = levelLabel(STATE.level, currentRoom);
+  const msg = lbl.startsWith('TO ') ? `⚡ ${lbl} ⚡` : `⚡ WARPED TO ${lbl} ⚡`;
+  showMessage(msg, 2500);
 }
 window.warpToRoom = warpToRoom;
 
