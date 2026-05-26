@@ -5171,11 +5171,11 @@ function buildEarth() {
   }
 
   // ── Cars on the road ──
-  // Two cars: one going north, one going south, at different speeds.
-  EARTH.cars.push(spawnEarthCar(-1.7,  -25,  6.0, 0xa83030));
-  EARTH.cars.push(spawnEarthCar( 1.7,   28, -7.5, 0x3060a0));
-  // Maybe a third if difficulty allows
-  if (Math.random() < 0.7) EARTH.cars.push(spawnEarthCar(-1.7, 12, 5.0, 0xe8c060));
+  // Two clearly-separated lanes: northbound on the LEFT side (x=-1.7),
+  // southbound on the RIGHT (x=+1.7) — like a real road. One car per lane,
+  // so they never share a position or merge into each other.
+  EARTH.cars.push(spawnEarthCar(-1.7,  -28,  6.5, 0xa83030));   // northbound
+  EARTH.cars.push(spawnEarthCar( 1.7,   28, -7.5, 0x3060a0));   // southbound
 }
 
 function buildEarthHouse(side, z, houseColor) {
@@ -5237,10 +5237,8 @@ function buildEarthHouse(side, z, houseColor) {
 function buildProtagonistHome() {
   // Same shape as the others but warmer color, decorated, far end of street.
   const home = buildEarthHouse(-1, -28, 0xc05040);
-  // Override doormat color — protagonist is golden-retriever brown
   home.doormat.material.color.setHex(0xd09060);
   home.doormat.material.emissiveIntensity = 0.8;
-  // Brighter window
   home.window.material.emissive.setHex(0xffe0a0);
   home.window.material.emissiveIntensity = 1.2;
   // Porch lamp (initially OFF — lights up after all 6 deliveries)
@@ -5248,25 +5246,147 @@ function buildProtagonistHome() {
     new THREE.CylinderGeometry(0.05, 0.05, 1.6, 8),
     new THREE.MeshStandardMaterial({ color: 0x303030 })
   );
-  lampPost.position.set(9 - 1.0, 0.8, -28 - 0.8);   // x = side*9 - 1 (left side, -1)... wait side=-1
-  // The home is at side=-1 so x = -9
   lampPost.position.set(-9 + 1.0, 0.8, -28 - 0.8);
   scene.add(lampPost);
   const lampHead = new THREE.Mesh(
     new THREE.SphereGeometry(0.18, 12, 8),
-    new THREE.MeshBasicMaterial({ color: 0x404040 })   // off
+    new THREE.MeshBasicMaterial({ color: 0x404040 })
   );
   lampHead.position.set(-9 + 1.0, 1.65, -28 - 0.8);
   scene.add(lampHead);
+
+  // ── Build the family, hidden until the dog walks up to the door ──
+  // Door is on the inside wall of the house at x = -9 + 1.5 = -7.5, z = -28.
+  // Porch is at x = -9 + 2.8 = -6.2. Place them on the porch, facing the player.
+  const porchX = -9 + 2.8;       // matches porch x in buildEarthHouse
+  const porchZ = -28;
+  const family = new THREE.Group();
+  family.visible = false;
+  // Spread them along z so all four read clearly
+  const dad      = buildPerson({ height: 1.85, hair: 0x2a1a10, shirt: 0x3060a0, pants: 0x202028, skin: 0xf0d0a8 });
+  const mom      = buildPerson({ height: 1.70, hair: 0x6a3a20, shirt: 0xc04060, pants: 0x202028, skin: 0xf8d8b0, longHair: true });
+  const son      = buildPerson({ height: 1.25, hair: 0x4a2a18, shirt: 0x60a040, pants: 0x3050a0, skin: 0xf0d0a8 });
+  const daughter = buildPerson({ height: 0.95, hair: 0xe0c060, shirt: 0xffa0c8, pants: 0xffa0c8, skin: 0xfde0c0, pigtails: true });
+  // Stand them in a row at the porch
+  dad.position.set(porchX,       0, porchZ + 0.6);
+  mom.position.set(porchX + 0.3, 0, porchZ - 0.5);
+  son.position.set(porchX - 0.6, 0, porchZ + 0.2);
+  daughter.position.set(porchX - 0.4, 0, porchZ - 0.8);
+  // Face the doormat / approaching dog (+X direction since porch is on -X side of home)
+  for (const p of [dad, mom, son, daughter]) p.rotation.y = Math.PI / 2;
+  family.add(dad); family.add(mom); family.add(son); family.add(daughter);
+  scene.add(family);
+
   return {
     group: home.group,
     doormat: home.doormat,
     doorMesh: home.door,
     window: home.window,
     lampHead,
+    family,
+    familyMembers: { dad, mom, son, daughter },
     x: -9,
     z: -28,
   };
+}
+
+// Procedural "person" — proportional cylinders + sphere head, child or adult.
+function buildPerson({ height, hair, shirt, pants, skin, longHair = false, pigtails = false }) {
+  const g = new THREE.Group();
+  // Scale all body measurements by height/1.7 so children read as smaller
+  const s = height / 1.7;
+  // Legs (two cylinders)
+  const legL = s * 0.42;
+  const legR = s * 0.07;
+  const pantsMat = new THREE.MeshStandardMaterial({ color: pants, roughness: 0.8 });
+  for (const sx of [-0.07, 0.07]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(legR, legR * 0.95, legL, 8), pantsMat);
+    leg.position.set(sx * s, legL / 2, 0);
+    g.add(leg);
+  }
+  // Shoes
+  const shoeMat = new THREE.MeshStandardMaterial({ color: 0x202020, roughness: 0.7 });
+  for (const sx of [-0.07, 0.07]) {
+    const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.12 * s, 0.06 * s, 0.18 * s), shoeMat);
+    shoe.position.set(sx * s, 0.03 * s, 0.03 * s);
+    g.add(shoe);
+  }
+  // Torso
+  const torsoH = s * 0.5;
+  const shirtMat = new THREE.MeshStandardMaterial({ color: shirt, roughness: 0.8 });
+  const torso = new THREE.Mesh(
+    new THREE.CylinderGeometry(s * 0.15, s * 0.13, torsoH, 12),
+    shirtMat
+  );
+  torso.position.set(0, legL + torsoH / 2, 0);
+  g.add(torso);
+  // Arms hanging at sides
+  const armR = s * 0.05;
+  const armL = s * 0.42;
+  for (const sx of [-1, 1]) {
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(armR, armR * 0.9, armL, 8), shirtMat);
+    arm.position.set(sx * s * 0.19, legL + torsoH - armL / 2 + s * 0.02, 0);
+    g.add(arm);
+  }
+  // Hands (skin spheres at arm tips)
+  const skinMat = new THREE.MeshStandardMaterial({ color: skin, roughness: 0.7 });
+  for (const sx of [-1, 1]) {
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(armR * 1.4, 8, 6), skinMat);
+    hand.position.set(sx * s * 0.19, legL + torsoH - armL + s * 0.02, 0);
+    g.add(hand);
+  }
+  // Neck
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(s * 0.05, s * 0.05, s * 0.06, 8), skinMat);
+  neck.position.set(0, legL + torsoH + s * 0.03, 0);
+  g.add(neck);
+  // Head
+  const head = new THREE.Mesh(new THREE.SphereGeometry(s * 0.12, 14, 10), skinMat);
+  head.position.set(0, legL + torsoH + s * 0.18, 0);
+  g.add(head);
+  // Hair cap (top half-sphere) — color varies; pigtails get bonuses
+  const hairMat = new THREE.MeshStandardMaterial({ color: hair, roughness: 0.85 });
+  const cap = new THREE.Mesh(
+    new THREE.SphereGeometry(s * 0.125, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2),
+    hairMat
+  );
+  cap.position.copy(head.position);
+  cap.position.y += s * 0.005;
+  g.add(cap);
+  if (longHair) {
+    // Long hair behind the head (a flatter blob hanging past the shoulders)
+    const flow = new THREE.Mesh(
+      new THREE.SphereGeometry(s * 0.13, 12, 9),
+      hairMat
+    );
+    flow.scale.set(1.0, 1.3, 0.55);
+    flow.position.set(0, legL + torsoH + s * 0.05, -s * 0.06);
+    g.add(flow);
+  }
+  if (pigtails) {
+    for (const sx of [-1, 1]) {
+      const tail = new THREE.Mesh(new THREE.SphereGeometry(s * 0.07, 10, 8), hairMat);
+      tail.scale.set(0.9, 1.3, 0.9);
+      tail.position.set(sx * s * 0.14, legL + torsoH + s * 0.1, 0);
+      g.add(tail);
+    }
+  }
+  // Eyes (tiny dark spheres)
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0x100808 });
+  for (const sx of [-0.03, 0.03]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(s * 0.012, 8, 6), eyeMat);
+    eye.position.set(sx * s, legL + torsoH + s * 0.19, s * 0.105);
+    g.add(eye);
+  }
+  // Smile
+  const mouth = new THREE.Mesh(
+    new THREE.TorusGeometry(s * 0.025, s * 0.005, 6, 12, Math.PI),
+    new THREE.MeshBasicMaterial({ color: 0x802020 })
+  );
+  mouth.position.set(0, legL + torsoH + s * 0.165, s * 0.108);
+  mouth.rotation.x = Math.PI;
+  g.add(mouth);
+  g.userData.armL = armL;
+  return g;
 }
 
 // Build a small follower dog (3D — same recipe as the kennel dog but tagged for Earth)
@@ -5617,20 +5737,53 @@ function triggerHomecoming() {
   document.exitPointerLock();
   showMessage('HOME. 🏠💛', 4500);
 
-  // Slow the player to a crawl — this is the moment
-  const startT = performance.now();
-  // We don't actually pause the loop; just gate the fade.
-  // Fade to white over ~3 seconds, then victory.
+  // Reveal the family on the porch — they were hidden until now.
+  const ph = EARTH.protagonistHome;
+  if (ph && ph.family) {
+    ph.family.visible = true;
+    // Door swings open
+    if (ph.doorMesh) {
+      const origRot = ph.doorMesh.rotation.y;
+      const startSw = performance.now();
+      const swing = () => {
+        const tt = (performance.now() - startSw) / 700;
+        if (tt < 1) {
+          ph.doorMesh.rotation.y = origRot + tt * 1.2;
+          requestAnimationFrame(swing);
+        }
+      };
+      requestAnimationFrame(swing);
+    }
+    // Gentle wave from one of the family members (the daughter waves both arms)
+    const startW = performance.now();
+    const wave = () => {
+      const k = (performance.now() - startW) / 1000;
+      if (k > 3.0) return;
+      // Animate the daughter's arms (last two arm cylinders + hands added in buildPerson)
+      // Simplest approach: jiggle the entire daughter group's rotation slightly
+      if (ph.familyMembers && ph.familyMembers.daughter) {
+        ph.familyMembers.daughter.position.y = Math.abs(Math.sin(k * 6)) * 0.08;
+      }
+      if (ph.familyMembers && ph.familyMembers.son) {
+        ph.familyMembers.son.position.y = Math.abs(Math.sin(k * 6 + 1.2)) * 0.06;
+      }
+      requestAnimationFrame(wave);
+    };
+    requestAnimationFrame(wave);
+  }
+
+  // Hold for a couple of seconds so the player actually sees the family
+  // (~1.6s with the family visible before the fade-to-white starts).
   const overlay = document.getElementById('transition-overlay');
   overlay.style.background = '#fff8e0';
   overlay.style.opacity = '0';
   overlay.style.transition = 'opacity 2.4s ease-out';
-  setTimeout(() => { overlay.style.opacity = '1'; }, 600);
+  setTimeout(() => { overlay.style.opacity = '1'; }, 1800);
   setTimeout(() => {
     overlay.style.transition = 'opacity 0.8s';      // restore for next time
     overlay.style.background = '#000';
     victoryGame();
-  }, 3300);
+  }, 4500);
 }
 
 function buildCatShipHijack() {
