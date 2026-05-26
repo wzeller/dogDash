@@ -47,7 +47,7 @@ const STATE = {
 };
 const DUNGEON_ROOMS = 3;       // rooms 1..3 are dungeon
 const OCEAN_LEVELS = ['ocean-surface', 'ocean-underwater', 'pirate-ship']; // rooms 4..6
-const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface', 'jupiter-surface', 'cat-ship-hijack', 'mars-approach']; // rooms 7..16
+const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface', 'jupiter-surface', 'cat-ship-hijack', 'mars-approach', 'mars-surface']; // rooms 7..17
 const OCEAN_BOUND = 18;
 const UNDERWATER_BOUND = 22;
 const SHIP_BOUND_X = 4.5;       // pirate ship deck half-width
@@ -60,6 +60,7 @@ const NEPTUNE_BOUND = 24;       // neptune surface: ruined city plaza
 const URANUS_BOUND  = 22;       // uranus surface: alien outpost
 const SATURN_BOUND  = 24;       // saturn surface: red gas plain
 const JUPITER_BOUND = 26;       // jupiter surface: stormy cloud deck
+const MARS_BOUND    = 26;       // mars surface: rocky red plain
 
 function levelForRoom(n) {
   if (n <= DUNGEON_ROOMS) return 'dungeon';
@@ -89,6 +90,7 @@ function levelLabel(level, roomNum) {
   if (level === 'jupiter-surface') return 'JUPITER';
   if (level === 'cat-ship-hijack') return 'CAT SHIP';
   if (level === 'mars-approach') return 'TO MARS';
+  if (level === 'mars-surface') return 'MARS';
   return '?';
 }
 function levelBounds(level) {
@@ -105,6 +107,7 @@ function levelBounds(level) {
   if (level === 'jupiter-surface') return [JUPITER_BOUND, JUPITER_BOUND];
   if (level === 'cat-ship-hijack') return [SPACE_BOUND_X, SPACE_BOUND_Z];   // small cockpit
   if (level === 'mars-approach') return [SPACE_BOUND_X, SPACE_BOUND_Z];
+  if (level === 'mars-surface') return [MARS_BOUND, MARS_BOUND];
   return [DUNGEON_BOUND, DUNGEON_BOUND];
 }
 
@@ -4018,6 +4021,456 @@ function spawnMarsMothership(x, y, z) {
   return ship;
 }
 
+// ─── Mars Surface: rocky plain + dust storm + possessed rovers + Earth rocket ─
+const MARS_EARTH_ROCKET = { mesh: null, active: false };
+const marsWind = { dirX: 1, dirZ: 0, mag: 0, phase: 0, gustTimer: 0 };
+
+function buildMarsSurface() {
+  // Dusty red ground with significant bumpiness — real Mars-like
+  const groundGeo = new THREE.PlaneGeometry(80, 80, 60, 60);
+  const groundMat = new THREE.MeshStandardMaterial({
+    color: 0xa04020, roughness: 0.95, metalness: 0.05,
+    emissive: 0x401008, emissiveIntensity: 0.2,
+  });
+  const pos = groundGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i);
+    pos.setZ(i,
+      Math.sin(x * 0.25) * 0.5 + Math.cos(y * 0.3) * 0.4 +
+      Math.sin(x * 0.08 + y * 0.12) * 0.9 +
+      (Math.random() - 0.5) * 0.18
+    );
+  }
+  groundGeo.computeVertexNormals();
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // Boulder field — scattered rocks of varying size
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x803020, roughness: 0.95, metalness: 0.05 });
+  const rockDarkMat = new THREE.MeshStandardMaterial({ color: 0x501808, roughness: 0.9 });
+  for (let i = 0; i < 28; i++) {
+    const r = 0.35 + Math.random() * 1.1;
+    const rock = new THREE.Mesh(
+      new THREE.DodecahedronGeometry(r, 0),
+      i % 3 === 0 ? rockDarkMat : rockMat
+    );
+    let rx, rz;
+    do {
+      rx = (Math.random() - 0.5) * 50;
+      rz = (Math.random() - 0.5) * 50;
+    } while (rx*rx + rz*rz < 18);
+    rock.position.set(rx, r * 0.35, rz);
+    rock.rotation.set(Math.random(), Math.random(), Math.random());
+    rock.castShadow = true;
+    rock.receiveShadow = true;
+    scene.add(rock);
+  }
+
+  // A few small craters — flat rings of darker rock
+  const craterMat = new THREE.MeshBasicMaterial({ color: 0x401008, transparent: true, opacity: 0.5 });
+  for (let i = 0; i < 5; i++) {
+    const cr = 1.5 + Math.random() * 2.0;
+    const crater = new THREE.Mesh(new THREE.RingGeometry(cr * 0.85, cr, 32), craterMat);
+    crater.rotation.x = -Math.PI / 2;
+    crater.position.set((Math.random() - 0.5) * 40, 0.04, (Math.random() - 0.5) * 40);
+    scene.add(crater);
+  }
+
+  // Distant cliff/mountain silhouettes (fade into dust fog)
+  const cliffMat = new THREE.MeshBasicMaterial({ color: 0x5a2010, fog: true });
+  for (let i = 0; i < 14; i++) {
+    const a = (i / 14) * Math.PI * 2;
+    const r = 38;
+    const h = 3 + Math.random() * 6;
+    const cliff = new THREE.Mesh(
+      new THREE.BoxGeometry(3 + Math.random() * 3, h, 2 + Math.random() * 2),
+      cliffMat
+    );
+    cliff.position.set(Math.cos(a) * r, h / 2, Math.sin(a) * r);
+    cliff.rotation.y = Math.random() * Math.PI;
+    scene.add(cliff);
+  }
+
+  // Sky dome — dusty orange-pink
+  const sky = new THREE.Mesh(
+    new THREE.SphereGeometry(80, 24, 16),
+    new THREE.MeshBasicMaterial({ color: 0x804030, side: THREE.BackSide, fog: false })
+  );
+  scene.add(sky);
+
+  // Phobos — small grey lump in the sky
+  const phobos = new THREE.Mesh(
+    new THREE.SphereGeometry(0.8, 16, 12),
+    new THREE.MeshStandardMaterial({ color: 0x806050, roughness: 0.95 })
+  );
+  phobos.position.set(25, 22, -30);
+  phobos.scale.set(1, 0.85, 0.95);     // irregular
+  scene.add(phobos);
+  // Tiny Earth as a distant blue dot — your destination
+  const earthDot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.5, 14, 10),
+    new THREE.MeshBasicMaterial({ color: 0x80c0ff })
+  );
+  earthDot.position.set(-30, 18, -40);
+  scene.add(earthDot);
+
+  // Dust particles whipping past
+  const dustGeo = new THREE.BufferGeometry();
+  const DUST_COUNT = isTouchDevice() ? 200 : 400;
+  const dustPos = new Float32Array(DUST_COUNT * 3);
+  for (let i = 0; i < DUST_COUNT; i++) {
+    dustPos[i*3 + 0] = (Math.random() - 0.5) * 70;
+    dustPos[i*3 + 1] = 0.2 + Math.random() * 6;
+    dustPos[i*3 + 2] = (Math.random() - 0.5) * 70;
+  }
+  dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+  const dust = new THREE.Points(
+    dustGeo,
+    new THREE.PointsMaterial({
+      color: 0xd08060, size: 0.16, sizeAttenuation: true,
+      transparent: true, opacity: 0.75, fog: true,
+    })
+  );
+  scene.add(dust);
+  scene.userData.marsDust = dust;
+
+  // Lightning-like dust-storm flash (optional ambient)
+  const stormFlash = new THREE.PointLight(0xffc080, 0.3, 80, 1);
+  stormFlash.position.set(0, 30, 0);
+  scene.add(stormFlash);
+  scene.userData.marsStormFlash = stormFlash;
+
+  // Lighting
+  const amb = new THREE.AmbientLight(0xff9060, 1.1);
+  scene.add(amb);
+  scene.userData.ambient = amb;
+  const sun = new THREE.DirectionalLight(0xffd090, 0.9);
+  sun.position.set(20, 25, 5);
+  sun.castShadow = true;
+  sun.shadow.mapSize.setScalar(1024);
+  scene.add(sun);
+  const hemi = new THREE.HemisphereLight(0xffa070, 0x401008, 0.95);
+  scene.add(hemi);
+
+  // Initialize wind state
+  marsWind.dirX = -1;
+  marsWind.dirZ = 0.3;
+  marsWind.mag = 1.0;
+  marsWind.phase = 0;
+  marsWind.gustTimer = 3;
+  MARS_EARTH_ROCKET.mesh = null;
+  MARS_EARTH_ROCKET.active = false;
+}
+
+function buildMarsEarthRocket() {
+  // ENORMOUS multi-stage rocket — taller and beefier than the Pluto/Uranus escape rocket.
+  const rocket = new THREE.Group();
+  const hullMat = new THREE.MeshStandardMaterial({ color: 0xf0f0f4, roughness: 0.5, metalness: 0.6 });
+  const accentMat = new THREE.MeshStandardMaterial({ color: 0x4080ff, roughness: 0.5, metalness: 0.4 });
+  const flameMat = new THREE.MeshBasicMaterial({ color: 0xff8030 });
+
+  // First stage — biggest
+  const s1 = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.8, 6.0, 22), hullMat);
+  s1.position.y = 3.0;
+  s1.castShadow = true;
+  rocket.add(s1);
+  // Blue stripe at base
+  const stripe = new THREE.Mesh(new THREE.CylinderGeometry(1.82, 1.82, 0.4, 22), accentMat);
+  stripe.position.y = 0.8;
+  rocket.add(stripe);
+  // "EARTH" label patch
+  const earthLabel = new THREE.Mesh(
+    new THREE.CircleGeometry(0.55, 24),
+    new THREE.MeshBasicMaterial({ color: 0x40a0ff })
+  );
+  earthLabel.position.set(0, 3.0, 1.81);
+  rocket.add(earthLabel);
+  const earthLabelText = new THREE.Mesh(
+    new THREE.CircleGeometry(0.18, 18),
+    new THREE.MeshBasicMaterial({ color: 0x80ffa0 })
+  );
+  earthLabelText.position.set(0, 3.0, 1.82);
+  rocket.add(earthLabelText);
+
+  // Inter-stage flange
+  const flange = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.6, 0.4, 18), accentMat);
+  flange.position.y = 6.2;
+  rocket.add(flange);
+
+  // Second stage — slimmer
+  const s2 = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.4, 4.0, 20), hullMat);
+  s2.position.y = 8.5;
+  rocket.add(s2);
+
+  // Capsule (nose)
+  const capsule = new THREE.Mesh(new THREE.ConeGeometry(1.2, 2.8, 18), accentMat);
+  capsule.position.y = 11.9;
+  rocket.add(capsule);
+  // Capsule porthole
+  const porthole = new THREE.Mesh(
+    new THREE.CircleGeometry(0.32, 18),
+    new THREE.MeshStandardMaterial({ color: 0x80c8ff, emissive: 0x40a0e0, emissiveIntensity: 0.8 })
+  );
+  porthole.position.set(0, 11.2, 1.22);
+  rocket.add(porthole);
+
+  // 4 first-stage engines visible at the bottom
+  const engineMat = new THREE.MeshStandardMaterial({ color: 0x303038, metalness: 0.85, roughness: 0.3 });
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2;
+    const eng = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.55, 0.9, 12), engineMat);
+    eng.position.set(Math.cos(a) * 1.1, -0.25, Math.sin(a) * 1.1);
+    rocket.add(eng);
+  }
+
+  // 4 fins
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2;
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.15, 2.5, 1.6), accentMat);
+    fin.position.set(Math.cos(a) * 1.8, 1.4, Math.sin(a) * 1.8);
+    fin.rotation.y = a;
+    rocket.add(fin);
+  }
+
+  // Door highlight ring at the entry point (low on the rocket)
+  const door = new THREE.Mesh(
+    new THREE.RingGeometry(1.0, 1.25, 28),
+    new THREE.MeshBasicMaterial({ color: 0x60ffe0, side: THREE.DoubleSide, transparent: true, opacity: 0.75 })
+  );
+  door.position.set(0, 1.4, 1.85);
+  rocket.add(door);
+  rocket.userData.door = door;
+
+  // Idle flame
+  const flame = new THREE.Mesh(new THREE.ConeGeometry(1.4, 2.5, 18), flameMat);
+  flame.rotation.x = Math.PI;
+  flame.position.y = -1.5;
+  rocket.add(flame);
+  rocket.userData.flame = flame;
+
+  // Glow at base
+  const glow = new THREE.PointLight(0xff8040, 3.2, 12, 2);
+  glow.position.y = -1.0;
+  rocket.add(glow);
+  rocket.userData.glow = glow;
+
+  // Place it well off-center so the player walks toward it
+  rocket.position.set(0, 0, -10);
+  scene.add(rocket);
+  MARS_EARTH_ROCKET.mesh = rocket;
+  MARS_EARTH_ROCKET.active = true;
+}
+
+// ─── Enemy: Possessed Mars Rover ────────────────────────────────────────────
+function spawnMarsRover(x, z) {
+  const r = new THREE.Group();
+  const chassisMat = new THREE.MeshStandardMaterial({ color: 0xd0a060, roughness: 0.7, metalness: 0.3 });
+  const partMat = new THREE.MeshStandardMaterial({ color: 0x808088, roughness: 0.6, metalness: 0.6 });
+  const panelMat = new THREE.MeshStandardMaterial({ color: 0x202848, roughness: 0.4, metalness: 0.6, emissive: 0x102030 });
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x303038, roughness: 0.85, metalness: 0.3 });
+  const catFurMat = new THREE.MeshStandardMaterial({ color: 0x2a1a3a, roughness: 0.85 });
+  const evilEyeMat = new THREE.MeshBasicMaterial({ color: 0xff2010 });
+
+  // Main chassis box (low, wide — like Curiosity / Perseverance)
+  const chassis = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.4, 1.6), chassisMat);
+  chassis.position.y = 0.55;
+  r.add(chassis);
+  // Solar panels / instrument deck on top
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.06, 1.4), panelMat);
+  deck.position.y = 0.82;
+  r.add(deck);
+  // Grid lines on the panel
+  for (let i = -2; i <= 2; i++) {
+    const line = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.07, 0.03), new THREE.MeshBasicMaterial({ color: 0x60c0ff }));
+    line.position.set(0, 0.83, i * 0.28);
+    r.add(line);
+  }
+
+  // 6 wheels (3 each side)
+  for (const sx of [-1, 1]) {
+    for (const sz of [-0.6, 0, 0.6]) {
+      const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.18, 16), wheelMat);
+      wheel.rotation.z = Math.PI / 2;
+      wheel.position.set(sx * 0.7, 0.22, sz);
+      r.add(wheel);
+      // Suspension arm
+      const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.4, 6), partMat);
+      arm.position.set(sx * 0.55, 0.35, sz);
+      arm.rotation.z = sx > 0 ? -0.5 : 0.5;
+      r.add(arm);
+    }
+  }
+
+  // Camera mast (tall pole with a head)
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.9, 8), partMat);
+  mast.position.set(0.3, 1.3, -0.4);
+  r.add(mast);
+  const camHead = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.3), partMat);
+  camHead.position.set(0.3, 1.8, -0.4);
+  r.add(camHead);
+  const camLens = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.07, 0.07, 0.08, 12),
+    new THREE.MeshBasicMaterial({ color: 0x101820 })
+  );
+  camLens.rotation.x = Math.PI / 2;
+  camLens.position.set(0.3, 1.8, -0.25);
+  r.add(camLens);
+
+  // Robotic arm (folded forward)
+  const armBase = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.18), partMat);
+  armBase.position.set(-0.45, 0.85, 0.6);
+  r.add(armBase);
+  const upperArm = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.6, 8), partMat);
+  upperArm.rotation.z = -0.5;
+  upperArm.position.set(-0.65, 1.0, 0.6);
+  r.add(upperArm);
+  const tool = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 0.15), evilEyeMat);
+  tool.position.set(-0.95, 0.95, 0.6);
+  r.add(tool);
+
+  // ── POSSESSED CAT perched on the deck ──
+  const cat = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.28, 14, 10), catFurMat);
+  body.scale.set(1, 0.85, 1.3);
+  body.position.y = 0.85 + 0.12;
+  cat.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 14, 10), catFurMat);
+  head.position.set(0.0, 0.85 + 0.4, 0.2);
+  cat.add(head);
+  // Evil glowing red eyes
+  for (const sx of [-0.07, 0.07]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 6), evilEyeMat);
+    eye.position.set(sx, 0.85 + 0.42, 0.38);
+    cat.add(eye);
+  }
+  // Ears
+  for (const sx of [-0.13, 0.13]) {
+    const ear = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.18, 4), catFurMat);
+    ear.position.set(sx, 0.85 + 0.6, 0.16);
+    ear.rotation.z = sx > 0 ? -0.25 : 0.25;
+    cat.add(ear);
+  }
+  // Tail (curled)
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.5, 6), catFurMat);
+  tail.rotation.z = 0.5;
+  tail.position.set(-0.25, 0.85 + 0.2, -0.3);
+  cat.add(tail);
+
+  // Faint red glow halo from the cat
+  const halo = new THREE.PointLight(0xff2010, 1.0, 3, 2);
+  halo.position.set(0, 0.85 + 0.4, 0.2);
+  cat.add(halo);
+  r.userData.catHalo = halo;
+  r.add(cat);
+
+  r.position.set(x, 0, z);
+  r.userData.health = diff().catHealth + 30;       // beefier — they're armored rovers
+  r.userData.speed = 1.4 + Math.random() * 0.6;    // slow but relentless
+  r.userData.attackTimer = 1.0 + Math.random() * 1.2;
+  r.userData.bobOffset = Math.random() * Math.PI * 2;
+  r.userData.isMarsRover = true;
+  r.userData.hitOffsetY = 0.7;
+  r.userData.hitRadius = 1.0;
+
+  scene.add(r);
+  ENEMIES.push(r);
+  return r;
+}
+
+// Mars wind + storm — applies a constant push on the player + drifts dust
+function updateMarsStorm(dt) {
+  if (STATE.level !== 'mars-surface') return;
+  const t = clock.getElapsedTime();
+  marsWind.phase += dt * 0.18;
+  marsWind.gustTimer -= dt;
+  let gust = 0;
+  if (marsWind.gustTimer <= 0) {
+    marsWind.gustTimer = 4 + Math.random() * 4;
+    if (Math.random() < 0.5) showMessage('🌪️ DUST STORM GUST!', 1100);
+  }
+  const sinceGust = (4 + 4) - marsWind.gustTimer;
+  if (sinceGust < 1.3) gust = 2.5 * (1 - sinceGust / 1.3);
+  marsWind.dirX = Math.cos(marsWind.phase);
+  marsWind.dirZ = Math.sin(marsWind.phase);
+  marsWind.mag = 1.0 + gust;
+  camera.position.x += marsWind.dirX * marsWind.mag * dt;
+  camera.position.z += marsWind.dirZ * marsWind.mag * dt;
+  const [BX, BZ] = levelBounds(STATE.level);
+  camera.position.x = Math.max(-BX, Math.min(BX, camera.position.x));
+  camera.position.z = Math.max(-BZ, Math.min(BZ, camera.position.z));
+
+  // Drift dust particles
+  const dust = scene.userData.marsDust;
+  if (dust) {
+    const pos = dust.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      let x = pos.getX(i) + marsWind.dirX * marsWind.mag * 12 * dt;
+      let z = pos.getZ(i) + marsWind.dirZ * marsWind.mag * 12 * dt;
+      if (x >  35) x -= 70;
+      if (x < -35) x += 70;
+      if (z >  35) z -= 70;
+      if (z < -35) z += 70;
+      pos.setX(i, x);
+      pos.setZ(i, z);
+    }
+    pos.needsUpdate = true;
+  }
+  // Storm flash
+  const flash = scene.userData.marsStormFlash;
+  if (flash) {
+    const strike = Math.sin(t * 0.45) * Math.sin(t * 1.7) > 0.92;
+    flash.intensity = strike ? 4.5 + Math.random() * 2 : 0.3;
+  }
+
+  // Earth rocket flame + door pulse
+  const rocket = MARS_EARTH_ROCKET.mesh;
+  if (rocket) {
+    if (rocket.userData.flame) {
+      rocket.userData.flame.scale.y = 1 + Math.sin(t * 18) * 0.2 + Math.sin(t * 6) * 0.12;
+    }
+    if (rocket.userData.door) {
+      rocket.userData.door.material.opacity = 0.55 + Math.sin(t * 4) * 0.3;
+    }
+    if (rocket.userData.glow) {
+      rocket.userData.glow.intensity = 2.6 + Math.sin(t * 6) * 0.8;
+    }
+  }
+}
+
+function triggerEarthRocketLaunch() {
+  transitioning = true;
+  document.exitPointerLock();
+  showMessage('🚀 BLAST OFF — BOUND FOR EARTH! 🌍', 3500);
+
+  // Animate the rocket lifting off
+  const rocket = MARS_EARTH_ROCKET.mesh;
+  const startY = rocket ? rocket.position.y : 0;
+  const startT = performance.now();
+  const lift = () => {
+    const tt = (performance.now() - startT) / 2000;
+    if (rocket) {
+      rocket.position.y = startY + tt * tt * 30;
+      if (rocket.userData.flame) {
+        rocket.userData.flame.scale.y = 1 + Math.sin(tt * 30) * 0.5 + tt * 3;
+      }
+    }
+    if (tt < 1) requestAnimationFrame(lift);
+  };
+  requestAnimationFrame(lift);
+
+  // Fade to blue (Earth sky) and end on victory
+  const overlay = document.getElementById('transition-overlay');
+  overlay.style.background = '#80c0ff';
+  overlay.style.opacity = '0';
+  setTimeout(() => { overlay.style.opacity = '1'; }, 1500);
+  setTimeout(() => {
+    overlay.style.background = '#000';
+    victoryGame();
+  }, 2600);
+}
+
 function buildCatShipHijack() {
   // Re-use the cockpit shell as the base
   buildSpaceCockpit();
@@ -4159,7 +4612,9 @@ function throwLaser() {
     origin = camera.position.clone().addScaledVector(dir, 0.6);
   }
 
-  const beam = makeLaserMesh(0x60ffff);
+  // Mars-surface fires red space-laser; everything else is cyan
+  const beamColor = STATE.level === 'mars-surface' ? 0xff3030 : 0x60ffff;
+  const beam = makeLaserMesh(beamColor);
   beam.position.copy(origin);
   const up = new THREE.Vector3(0, 1, 0);
   beam.quaternion.setFromUnitVectors(up, dir.clone().normalize());
@@ -6232,8 +6687,9 @@ function triggerMarsLanding() {
   overlay.style.opacity = '0';
   setTimeout(() => { overlay.style.opacity = '1'; }, 1200);
   setTimeout(() => {
-    overlay.style.background = '#000';
-    victoryGame();
+    overlay.style.background = '#000';   // reset for loadNextRoom's own fade
+    transitioning = false;
+    loadNextRoom();                       // → room 17 = mars-surface
   }, 2200);
 }
 
@@ -6339,6 +6795,10 @@ function checkDoorTransition() {
       // Motherships down — soft landing on Mars
       scene.userData.spacePhase = 'approach';
       showMessage('MOTHERSHIPS DESTROYED! DESCENDING TO MARS… 🔴', 4500);
+    } else if (STATE.level === 'mars-surface') {
+      // Possessed rovers down — the Earth rocket roars in
+      buildMarsEarthRocket();
+      showMessage('ROVERS DOWN! AN ENORMOUS ROCKET RISES — BOARD FOR EARTH! 🚀🌍', 5000);
     } else if (STATE.level === 'pluto-surface') {
       // A rocketship lands on the ice (visible from anywhere)
       buildPlutoRocketship();
@@ -6414,6 +6874,13 @@ function checkDoorTransition() {
       const dz = camera.position.z - JUPITER_DIG.mesh.position.z;
       if (Math.sqrt(dx*dx + dz*dz) < 1.6) triggerJupiterDig();
     }
+  } else if (STATE.level === 'mars-surface') {
+    // Walk into the Earth-bound rocket once it's risen
+    if (MARS_EARTH_ROCKET.active && MARS_EARTH_ROCKET.mesh && !transitioning) {
+      const dx = camera.position.x - MARS_EARTH_ROCKET.mesh.position.x;
+      const dz = camera.position.z - MARS_EARTH_ROCKET.mesh.position.z;
+      if (Math.sqrt(dx*dx + dz*dz) < 2.2) triggerEarthRocketLaunch();
+    }
   } else if (isSpaceLike(STATE.level)) {
     // No portal — handled in updateSpaceProgress (drives crash/landing sequence)
   } else if (isOceanLike(STATE.level)) {
@@ -6446,7 +6913,11 @@ function victoryGame() {
   const t = document.getElementById('victory-title');
   const s1 = document.getElementById('victory-sub1');
   const s2 = document.getElementById('victory-sub2');
-  if (STATE.level === 'mars-approach') {
+  if (STATE.level === 'mars-surface') {
+    if (t) t.textContent = 'EARTH BOUND!';
+    if (s1) s1.textContent = 'POSSESSED ROVERS DEFEATED • ROCKET LAUNCHED';
+    if (s2) s2.textContent = `HOME IS WAITING • ${STATE.diamonds} 💎`;
+  } else if (STATE.level === 'mars-approach') {
     if (t) t.textContent = 'MARS!';
     if (s1) s1.textContent = 'MOTHERSHIPS DOWN • SOFT LANDING';
     if (s2) s2.textContent = `THE RED PLANET IS YOURS • ${STATE.diamonds} 💎`;
@@ -6531,6 +7002,7 @@ function loadNextRoom() {
     SPIKE_PICKUPS.length = 0;
     PLUTO_CRACKS.length = 0;
     JUPITER_DIG.mesh = null; JUPITER_DIG.active = false;
+    MARS_EARTH_ROCKET.mesh = null; MARS_EARTH_ROCKET.active = false;
     scene.userData = {};
     portalActive = false;
 
@@ -6567,6 +7039,7 @@ function loadNextRoom() {
       'jupiter-surface':  'JUPITER STORM! SPIKE-LAUNCH THE TENNIS BALLS! 🎾🗡️',
       'cat-ship-hijack':  'TRAPPED IN A CAT SHIP CAGE… 😾',
       'mars-approach':    'MARS APPROACH! LIT MOTHERSHIPS — SHOOT THEIR DARK SPOT! 🔴',
+      'mars-surface':     'MARS! EVIL DUST STORMS! POSSESSED ROVERS! RED SPACE LASER! 🔴🤖😾',
       'dungeon':          `ROOM ${currentRoom} — SPOOKIER IN HERE...`,
     };
     showMessage(intro[STATE.level] || '', 3500);
@@ -6581,6 +7054,36 @@ function updateEnemies(dt) {
   const onSurface = STATE.level === 'ocean-surface';
   const inSpace = isSpaceLike(STATE.level);
   for (const e of ENEMIES) {
+    if (e.userData.isMarsRover) {
+      // Slow relentless chase, fires evil-cat eye lasers periodically
+      const to = SCRATCH.vA.set(camera.position.x - e.position.x, 0, camera.position.z - e.position.z);
+      const dist = to.length();
+      if (dist > 0.001) to.multiplyScalar(1 / dist);
+      e.rotation.y = Math.atan2(to.x, to.z);
+      if (dist > 1.8) e.position.addScaledVector(to, e.userData.speed * dt);
+      // Slight forward bob like rolling on uneven terrain
+      e.position.y = Math.sin(t * 4 + e.userData.bobOffset) * 0.04;
+      // Pulse cat halo
+      if (e.userData.catHalo) {
+        e.userData.catHalo.intensity = 0.8 + Math.sin(t * 5 + e.userData.bobOffset) * 0.5;
+      }
+      // Fire from cat eyes
+      e.userData.attackTimer -= dt;
+      if (e.userData.attackTimer <= 0 && dist < 16) {
+        e.userData.attackTimer = 1.5 + Math.random() * 0.6;
+        const from = e.position.clone().add(new THREE.Vector3(0, 1.27, 0)).addScaledVector(to, 0.4);
+        const dir = new THREE.Vector3().subVectors(camera.position, from).normalize();
+        spawnEnemyLaser(from, dir, 11);
+      }
+      // Contact ram damage
+      if (dist < 1.4) {
+        e.userData.attackTimer = Math.max(e.userData.attackTimer, 0.9);
+        damagePlayer(14);
+        e.position.addScaledVector(to, -0.6);
+      }
+      continue;
+    }
+
     if (e.userData.isMothership) {
       // Slow drift, rotate (so weak spot tracks around), fire cannons periodically
       const to = SCRATCH.vA.set(camera.position.x - e.position.x, 0, camera.position.z - e.position.z);
@@ -7526,6 +8029,7 @@ function rebuildLevel(fromBeginning) {
   SPIKE_PICKUPS.length = 0;
   PLUTO_CRACKS.length = 0;
   JUPITER_DIG.mesh = null; JUPITER_DIG.active = false;
+  MARS_EARTH_ROCKET.mesh = null; MARS_EARTH_ROCKET.active = false;
 
   scene.userData = {};
 
@@ -7704,6 +8208,17 @@ function buildLevel(level) {
     buildMarsApproach();
     spawnSpaceHealthPacks(4);
     spawnSpaceLaserPacks(6);    // generous laser supply — user explicitly asked
+  } else if (level === 'mars-surface') {
+    scene.fog = new THREE.FogExp2(0x804030, 0.028);
+    renderer.setClearColor(0x804030);
+    camera.position.set(0, PLAYER_HEIGHT, 16);
+    playerYaw = Math.PI;
+    swapHeldToBlaster();
+    setSpacesuitVisor(true);
+    if (STATE.lasers < 40) STATE.lasers = 70;
+    buildMarsSurface();
+    spawnGroundMedkits(diff().treatBase + 2);
+    spawnGroundLaserPacks(4);
   }
 }
 
@@ -7738,6 +8253,7 @@ const DEV_ROOMS = [
   { room: 14, label: 'Room 14 — Jupiter (Tennis Balls)' },
   { room: 15, label: 'Room 15 — Cat Ship Hijack' },
   { room: 16, label: 'Room 16 — Mars Approach (Motherships)' },
+  { room: 17, label: 'Room 17 — Mars Surface (Rovers + Earth Rocket)' },
 ];
 
 function toggleDevMenu() {
@@ -7849,6 +8365,13 @@ function updateSpawner(dt) {
         const z = Math.sin(angle) * r;
         spawnGrayAlien(x, z);
         enemyLabel = 'GRAY ALIEN';
+      } else if (STATE.level === 'mars-surface') {
+        // Possessed rovers roll in from beyond the boulder field
+        const r = 16 + Math.random() * 6;
+        const x = Math.cos(angle) * r;
+        const z = Math.sin(angle) * r;
+        spawnMarsRover(x, z);
+        enemyLabel = 'POSSESSED ROVER';
       } else if (STATE.level === 'mars-approach') {
         // One enormous mothership per wave — spawn just one regardless of `count`
         if (i === 0) {
@@ -7939,6 +8462,7 @@ function loop() {
   updateSpikePickups(dt);
   updateSaturnWind(dt);
   updateJupiterStorm(dt);
+  updateMarsStorm(dt);
   updateCatShipHijack(dt);
   updateParticles(dt);
   updateExplosions(dt);
