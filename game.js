@@ -3942,8 +3942,7 @@ function buildRoom(roomNum) {
   // Hanging chains from ceiling
   addChains();
 
-  // Skull pile decorations
-  addSkullPiles();
+  // (Skull-pile decorations removed — they read like un-collectable bones.)
 
   // Door arch (north wall) — opens when room is cleared
   addDoorArch(roomNum);
@@ -5547,6 +5546,45 @@ function spawnSpaceHealthPacks(count) {
   }
 }
 
+// Ground-placed laser pack — same visual but positioned on a planet surface
+// instead of scrolling in from the cockpit horizon.
+function spawnGroundLaserPacks(count) {
+  for (let i = 0; i < count; i++) {
+    const g = new THREE.Group();
+    const core = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.25, 0),
+      new THREE.MeshStandardMaterial({
+        color: 0x60ffff, emissive: 0x40e0ff, emissiveIntensity: 1.8,
+        metalness: 0.6, roughness: 0.2,
+      })
+    );
+    core.scale.y = 1.5;
+    g.add(core);
+    const shell = new THREE.Mesh(
+      new THREE.SphereGeometry(0.5, 10, 7),
+      new THREE.MeshBasicMaterial({ color: 0x60ffff, transparent: true, opacity: 0.16, side: THREE.BackSide })
+    );
+    g.add(shell);
+    const glow = new THREE.PointLight(0x60ffff, 1.6, 4, 2);
+    g.add(glow);
+    g.userData.glow = glow;
+    g.userData.shell = shell;
+    g.userData.isLaserPack = true;
+    g.userData.lasers = 16;             // a bit more generous than the scrolling pack
+    g.userData.scrollSpeed = 0;          // stays put
+    g.userData.bobPhase = Math.random() * Math.PI * 2;
+    // Random ground placement, away from spawn point
+    let px, pz;
+    do {
+      px = (Math.random() - 0.5) * 36;
+      pz = (Math.random() - 0.5) * 36;
+    } while (px*px + pz*pz < 9);
+    g.position.set(px, 0.9, pz);
+    scene.add(g);
+    SPACE_PICKUPS.push(g);
+  }
+}
+
 function spawnSpaceLaserPacks(count) {
   for (let i = 0; i < count; i++) {
     const g = new THREE.Group();
@@ -5593,18 +5631,20 @@ function updateSpacePickups(dt) {
   const t = clock.getElapsedTime();
   for (let i = SPACE_PICKUPS.length - 1; i >= 0; i--) {
     const p = SPACE_PICKUPS[i];
-    // Scroll toward player
+    // Scroll toward player (ground pickups have scrollSpeed = 0 and stay put)
     p.position.z += p.userData.scrollSpeed * dt;
-    // Subtle drift + spin
-    p.position.y += Math.sin(t * 1.5 + p.userData.bobPhase) * dt * 0.3;
+    if (p.userData.scrollSpeed > 0) {
+      // Cockpit pickups drift in Y a bit while flying past
+      p.position.y += Math.sin(t * 1.5 + p.userData.bobPhase) * dt * 0.3;
+    }
     p.rotation.y += dt * 2.0;
     p.rotation.x += dt * 0.7;
     if (p.userData.glow) {
       p.userData.glow.intensity = 1.2 + Math.sin(t * 4 + p.userData.bobPhase) * 0.6;
     }
 
-    // Recycle if it scrolls past the player
-    if (p.position.z > 4) {
+    // Recycle if it scrolls past the player (only relevant for cockpit pickups)
+    if (p.userData.scrollSpeed > 0 && p.position.z > 4) {
       placeSpacePickup(p);
       continue;
     }
@@ -7058,9 +7098,10 @@ function buildLevel(level) {
     playerYaw = Math.PI;
     swapHeldToBlaster();
     setSpacesuitVisor(true);
-    if (STATE.lasers === 0) STATE.lasers = 32;
+    if (STATE.lasers < 40) STATE.lasers = 60;
     buildPlutoSurface();
     spawnTreatPickups(diff().treatBase + 2);
+    spawnGroundLaserPacks(4);
   } else if (level === 'neptune-approach') {
     scene.fog = null;
     renderer.setClearColor(0x000010);
