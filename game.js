@@ -351,6 +351,14 @@ let clock, scene, camera, renderer;
 let playerYaw = 0, playerPitch = 0;
 let playerVelocityY = 0;
 const playerState = { crackFalling: false };
+
+// Axis-aligned obstacles a level builder can register; resolved in updatePlayer
+// after the bounds clamp. isActive() lets things toggle (e.g. doors that open).
+const LEVEL_OBSTACLES = [];
+function clearLevelObstacles() { LEVEL_OBSTACLES.length = 0; }
+function addLevelBox(minX, maxX, minZ, maxZ, isActive) {
+  LEVEL_OBSTACLES.push({ minX, maxX, minZ, maxZ, isActive: isActive || null });
+}
 const GRAVITY = -20;
 const PLAYER_SPEED = 6;
 const RUN_MULT = 1.8;
@@ -4690,7 +4698,12 @@ function buildRocketInterior() {
       x: cx,
       z: cz,
     });
+    // Block the player from walking into this cage's footprint
+    addLevelBox(cx - 0.8, cx + 0.8, cz - 0.8, cz + 0.8);
   }
+
+  // Closed door blocks the doorway (3.2m wide). Active only while shut.
+  addLevelBox(-1.6, 1.6, 2.85, 3.15, () => !ROCKET_INT.doorOpen);
 
   // Back wall (closes off the kennel)
   const backWall = new THREE.Mesh(new THREE.PlaneGeometry(W, H), wallMat);
@@ -6069,6 +6082,25 @@ function updatePlayer(dt) {
   const [WX, WZ] = levelBounds(STATE.level);
   next.x = Math.max(-WX, Math.min(WX, next.x));
   next.z = Math.max(-WZ, Math.min(WZ, next.z));
+  // Resolve any per-level obstacle boxes (cages, closed doors, etc.). For each
+  // box that's currently active and the player is inside (expanded by their
+  // radius), push them out along whichever edge has the smallest overlap.
+  const PLAYER_R = 0.38;
+  for (const ob of LEVEL_OBSTACLES) {
+    if (ob.isActive && !ob.isActive()) continue;
+    const eMinX = ob.minX - PLAYER_R, eMaxX = ob.maxX + PLAYER_R;
+    const eMinZ = ob.minZ - PLAYER_R, eMaxZ = ob.maxZ + PLAYER_R;
+    if (next.x <= eMinX || next.x >= eMaxX || next.z <= eMinZ || next.z >= eMaxZ) continue;
+    const dL = next.x - eMinX;
+    const dR = eMaxX - next.x;
+    const dB = next.z - eMinZ;
+    const dT = eMaxZ - next.z;
+    const m = Math.min(dL, dR, dB, dT);
+    if      (m === dL) next.x = eMinX;
+    else if (m === dR) next.x = eMaxX;
+    else if (m === dB) next.z = eMinZ;
+    else                next.z = eMaxZ;
+  }
   camera.position.x = next.x;
   camera.position.z = next.z;
 
@@ -7481,6 +7513,7 @@ function loadNextRoom() {
     ROCKET_INT.target = null; ROCKET_INT.key = null; ROCKET_INT.door = null;
     ROCKET_INT.cages.length = 0; ROCKET_INT.freed = 0;
     ROCKET_INT.phase = 'bomb'; ROCKET_INT.keyHeld = false; ROCKET_INT.doorOpen = false;
+    clearLevelObstacles();
     scene.userData = {};
     portalActive = false;
 
@@ -8512,6 +8545,7 @@ function rebuildLevel(fromBeginning) {
   ROCKET_INT.target = null; ROCKET_INT.key = null; ROCKET_INT.door = null;
   ROCKET_INT.cages.length = 0; ROCKET_INT.freed = 0;
   ROCKET_INT.phase = 'bomb'; ROCKET_INT.keyHeld = false; ROCKET_INT.doorOpen = false;
+  clearLevelObstacles();
 
   scene.userData = {};
 
