@@ -47,7 +47,7 @@ const STATE = {
 };
 const DUNGEON_ROOMS = 3;       // rooms 1..3 are dungeon
 const OCEAN_LEVELS = ['ocean-surface', 'ocean-underwater', 'pirate-ship']; // rooms 4..6
-const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface', 'jupiter-surface', 'cat-ship-hijack', 'mars-approach', 'mars-surface']; // rooms 7..17
+const SPACE_LEVELS = ['space-cockpit', 'pluto-surface', 'neptune-approach', 'neptune-surface', 'uranus-surface', 'saturn-approach', 'saturn-surface', 'jupiter-surface', 'cat-ship-hijack', 'mars-approach', 'mars-surface', 'rocket-interior']; // rooms 7..18
 const OCEAN_BOUND = 18;
 const UNDERWATER_BOUND = 22;
 const SHIP_BOUND_X = 4.5;       // pirate ship deck half-width
@@ -61,6 +61,8 @@ const URANUS_BOUND  = 22;       // uranus surface: alien outpost
 const SATURN_BOUND  = 24;       // saturn surface: red gas plain
 const JUPITER_BOUND = 26;       // jupiter surface: stormy cloud deck
 const MARS_BOUND    = 26;       // mars surface: rocky red plain
+const ROCKET_INT_BOUND_X = 3.6; // rocket interior: tight cabin
+const ROCKET_INT_BOUND_Z = 12;
 
 function levelForRoom(n) {
   if (n <= DUNGEON_ROOMS) return 'dungeon';
@@ -91,6 +93,7 @@ function levelLabel(level, roomNum) {
   if (level === 'cat-ship-hijack') return 'CAT SHIP';
   if (level === 'mars-approach') return 'TO MARS';
   if (level === 'mars-surface') return 'MARS';
+  if (level === 'rocket-interior') return 'EARTH ROCKET';
   return '?';
 }
 function levelBounds(level) {
@@ -108,6 +111,7 @@ function levelBounds(level) {
   if (level === 'cat-ship-hijack') return [SPACE_BOUND_X, SPACE_BOUND_Z];   // small cockpit
   if (level === 'mars-approach') return [SPACE_BOUND_X, SPACE_BOUND_Z];
   if (level === 'mars-surface') return [MARS_BOUND, MARS_BOUND];
+  if (level === 'rocket-interior') return [ROCKET_INT_BOUND_X, ROCKET_INT_BOUND_Z];
   return [DUNGEON_BOUND, DUNGEON_BOUND];
 }
 
@@ -4460,15 +4464,456 @@ function triggerEarthRocketLaunch() {
   };
   requestAnimationFrame(lift);
 
-  // Fade to blue (Earth sky) and end on victory
+  // Fade to blue (Earth sky), then load the rocket interior for the bomb / key / kennel sequence
+  const overlay = document.getElementById('transition-overlay');
+  overlay.style.background = '#80c0ff';
+  overlay.style.opacity = '0';
+  setTimeout(() => { overlay.style.opacity = '1'; }, 1500);
+  setTimeout(() => {
+    overlay.style.background = '#000';   // reset for loadNextRoom's own fade
+    transitioning = false;
+    loadNextRoom();                       // → room 18 = rocket-interior
+  }, 2600);
+}
+
+// ─── Rocket Interior (en route to Earth) ────────────────────────────────────
+// Multi-phase level inside the Earth-bound rocket:
+//   1. 'bomb'     — shoot a bomb (F / missile) into a red bullseye on the bulkhead
+//   2. 'fetch-key'— a key falls; walk over it to pick up
+//   3. 'door'     — walk to the back door, it auto-unlocks
+//   4. 'kennel'   — door slides aside, kennel revealed; FIRE-click each cage to free a dog
+//   5. 'landing'  — all dogs freed → Earth landing → victory
+const ROCKET_INT = {
+  phase: 'bomb',
+  target: null,        // red circle target mesh
+  key: null,           // dropped key mesh
+  keyHeld: false,
+  door: null,          // door blocker mesh
+  doorOpen: false,
+  cages: [],           // [{ group, dog, lock, opened }]
+  freed: 0,
+};
+
+function buildRocketInterior() {
+  ROCKET_INT.phase = 'bomb';
+  ROCKET_INT.target = null;
+  ROCKET_INT.key = null;
+  ROCKET_INT.keyHeld = false;
+  ROCKET_INT.door = null;
+  ROCKET_INT.doorOpen = false;
+  ROCKET_INT.cages.length = 0;
+  ROCKET_INT.freed = 0;
+
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0x60686e, roughness: 0.55, metalness: 0.6 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x30343a, metalness: 0.85, roughness: 0.3 });
+  const floorMat = new THREE.MeshStandardMaterial({ color: 0x404448, roughness: 0.55, metalness: 0.5 });
+  const lightMat = new THREE.MeshBasicMaterial({ color: 0xa0e0ff });
+
+  // Cabin is roughly z=[-12, +12], x=[-4, +4]
+  const W = 8, H = 4, D = 24;
+
+  // Floor
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(W, D, 8, 16), floorMat);
+  floor.rotation.x = -Math.PI / 2;
+  scene.add(floor);
+  // Ceiling
+  const ceil = new THREE.Mesh(new THREE.PlaneGeometry(W, D, 8, 16), wallMat);
+  ceil.rotation.x = Math.PI / 2;
+  ceil.position.y = H;
+  scene.add(ceil);
+  // Side walls
+  for (const sx of [-1, 1]) {
+    const side = new THREE.Mesh(new THREE.PlaneGeometry(D, H), wallMat);
+    side.position.set(sx * W / 2, H / 2, 0);
+    side.rotation.y = -sx * Math.PI / 2;
+    scene.add(side);
+    // Trim rails along walls
+    for (const hy of [0.4, H - 0.4]) {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, D), trimMat);
+      rail.position.set(sx * (W / 2 - 0.06), hy, 0);
+      scene.add(rail);
+    }
+    // Ceiling strip lights (4 per side)
+    for (let i = -2; i <= 1; i++) {
+      const strip = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 1.6), lightMat);
+      strip.position.set(sx * (W / 2 - 0.2), H - 0.2, i * 6 + 3);
+      scene.add(strip);
+    }
+  }
+
+  // ── Front bulkhead at z = -12 with red circle target ──
+  const bulkhead = new THREE.Mesh(new THREE.PlaneGeometry(W, H), wallMat);
+  bulkhead.position.set(0, H / 2, -D / 2);
+  scene.add(bulkhead);
+  // Heavy trim around the target
+  const targetFrame = new THREE.Mesh(new THREE.TorusGeometry(1.4, 0.12, 8, 28), trimMat);
+  targetFrame.position.set(0, 2, -D / 2 + 0.01);
+  targetFrame.rotation.y = 0;
+  scene.add(targetFrame);
+  // Red circle target (bull's eye)
+  const target = new THREE.Group();
+  const outer = new THREE.Mesh(
+    new THREE.CircleGeometry(1.2, 36),
+    new THREE.MeshBasicMaterial({ color: 0x801010 })
+  );
+  outer.position.z = 0.02;
+  target.add(outer);
+  const mid = new THREE.Mesh(
+    new THREE.CircleGeometry(0.7, 32),
+    new THREE.MeshBasicMaterial({ color: 0xc01818 })
+  );
+  mid.position.z = 0.03;
+  target.add(mid);
+  const inner = new THREE.Mesh(
+    new THREE.CircleGeometry(0.32, 24),
+    new THREE.MeshBasicMaterial({ color: 0xff4040 })
+  );
+  inner.position.z = 0.04;
+  target.add(inner);
+  // Bright pulsing center
+  const eye = new THREE.Mesh(
+    new THREE.CircleGeometry(0.12, 18),
+    new THREE.MeshBasicMaterial({ color: 0xffffa0 })
+  );
+  eye.position.z = 0.05;
+  target.add(eye);
+  target.position.set(0, 2, -D / 2 + 0.02);
+  scene.add(target);
+  target.userData.isRedCircle = true;
+  target.userData.health = 1;
+  target.userData.hitOffsetY = 0;
+  target.userData.hitRadius = 1.3;
+  target.userData.eye = eye;
+  ENEMIES.push(target);     // collision handled via existing ENEMIES loop
+  ROCKET_INT.target = target;
+
+  // Dashboard panel just below the target — bunch of glowing buttons
+  const dash = new THREE.Mesh(new THREE.BoxGeometry(4, 0.3, 0.5), trimMat);
+  dash.position.set(0, 1.0, -D / 2 + 0.3);
+  scene.add(dash);
+  const dashColors = [0x60ffa0, 0xffd060, 0xff4060, 0x60c0ff];
+  for (let i = 0; i < 10; i++) {
+    const c = dashColors[i % dashColors.length];
+    const btn = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.06, 0.18), new THREE.MeshBasicMaterial({ color: c }));
+    btn.position.set(-1.8 + i * 0.4, 1.18, -D / 2 + 0.45);
+    scene.add(btn);
+  }
+
+  // ── Door at z = +3 (mid-cabin), separating front from kennel ──
+  // Frame
+  const doorFrameMat = trimMat;
+  const frameTop = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.3, 0.4), doorFrameMat);
+  frameTop.position.set(0, 3.0, 3);
+  scene.add(frameTop);
+  for (const sx of [-1, 1]) {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.3, 3.0, 0.4), doorFrameMat);
+    post.position.set(sx * 1.6, 1.5, 3);
+    scene.add(post);
+  }
+  // Door panel (slides up when unlocked)
+  const door = new THREE.Mesh(
+    new THREE.BoxGeometry(3.2, 2.8, 0.18),
+    new THREE.MeshStandardMaterial({ color: 0x90a8b8, metalness: 0.6, roughness: 0.4 })
+  );
+  door.position.set(0, 1.5, 3);
+  scene.add(door);
+  ROCKET_INT.door = door;
+  // Lock indicator (red, becomes green when key collected)
+  const lock = new THREE.Mesh(
+    new THREE.SphereGeometry(0.15, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0xff2030 })
+  );
+  lock.position.set(0, 1.5, 3 - 0.12);
+  scene.add(lock);
+  door.userData.lock = lock;
+
+  // ── Kennel area (z > 3) — cages + dogs ──
+  // 6 cages: 3 on each side of the corridor
+  const cageBarMat = new THREE.MeshStandardMaterial({ color: 0x303038, metalness: 0.9, roughness: 0.3 });
+  const cageFloorMat = new THREE.MeshStandardMaterial({ color: 0x504030, roughness: 0.85 });
+  const cagePositions = [
+    [-2.8, 5], [-2.8, 8], [-2.8, 11],
+    [ 2.8, 5], [ 2.8, 8], [ 2.8, 11],
+  ];
+  for (let i = 0; i < cagePositions.length; i++) {
+    const [cx, cz] = cagePositions[i];
+    const cage = new THREE.Group();
+    // Cage floor
+    const cageFloor = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 1.6), cageFloorMat);
+    cageFloor.position.set(0, 0.05, 0);
+    cage.add(cageFloor);
+    // Back wall
+    const back = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.6, 0.1), cageBarMat);
+    back.position.set(0, 0.8, -0.8 * Math.sign(cx));   // back wall away from corridor
+    cage.add(back);
+    // Side walls
+    for (const sz of [-1, 1]) {
+      const side = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.6, 1.6), cageBarMat);
+      side.position.set(0.8 * (cx > 0 ? -1 : 1), 0.8, sz * 0.8);
+      cage.add(side);
+    }
+    // Top
+    const top = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 1.6), cageBarMat);
+    top.position.set(0, 1.6, 0);
+    cage.add(top);
+    // Front bars (the bars that face the corridor)
+    const frontFaceX = cx > 0 ? -0.8 : 0.8;
+    const cageFront = new THREE.Group();
+    for (let b = -3; b <= 3; b++) {
+      const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.55, 8), cageBarMat);
+      bar.position.set(frontFaceX, 0.8, b * 0.22);
+      cageFront.add(bar);
+    }
+    cage.add(cageFront);
+    // Lock indicator (glowing pad on the bars)
+    const cageLock = new THREE.Mesh(
+      new THREE.SphereGeometry(0.12, 14, 10),
+      new THREE.MeshBasicMaterial({ color: 0xff2030 })
+    );
+    cageLock.position.set(frontFaceX, 1.0, 0);
+    cage.add(cageLock);
+
+    // Dog inside
+    const dog = buildKenneledDog();
+    dog.position.set(0, 0, 0);
+    dog.rotation.y = cx > 0 ? -Math.PI / 2 : Math.PI / 2;   // face the bars
+    cage.add(dog);
+
+    cage.position.set(cx, 0, cz);
+    scene.add(cage);
+    ROCKET_INT.cages.push({
+      group: cage,
+      dog,
+      lock: cageLock,
+      front: cageFront,
+      opened: false,
+      x: cx,
+      z: cz,
+    });
+  }
+
+  // Back wall (closes off the kennel)
+  const backWall = new THREE.Mesh(new THREE.PlaneGeometry(W, H), wallMat);
+  backWall.position.set(0, H / 2, D / 2);
+  backWall.rotation.y = Math.PI;
+  scene.add(backWall);
+
+  // Lighting
+  const amb = new THREE.AmbientLight(0xa0c0d0, 0.9);
+  scene.add(amb);
+  scene.userData.ambient = amb;
+  const ceilingLight = new THREE.PointLight(0xc0e0ff, 1.4, 18, 1.5);
+  ceilingLight.position.set(0, H - 0.3, 0);
+  scene.add(ceilingLight);
+  const kennelLight = new THREE.PointLight(0xffe0a0, 1.2, 14, 1.5);
+  kennelLight.position.set(0, H - 0.3, 8);
+  scene.add(kennelLight);
+
+  // Top up missiles so the bomb phase is comfortable
+  STATE.missiles = Math.max(STATE.missiles, 6);
+}
+
+// A small kennelled dog mesh — used inside the cages.
+function buildKenneledDog() {
+  const g = new THREE.Group();
+  const furColors = [0xc0804a, 0xa06038, 0xe8b070, 0xfff0c8, 0x303030];
+  const c = furColors[Math.floor(Math.random() * furColors.length)];
+  const fur = new THREE.MeshStandardMaterial({ color: c, roughness: 0.85 });
+  const darkFur = new THREE.MeshStandardMaterial({ color: 0x402810, roughness: 0.9 });
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0x100808 });
+  const noseMat = new THREE.MeshStandardMaterial({ color: 0x100808, roughness: 0.5 });
+  // Body
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 9), fur);
+  body.scale.set(1.1, 0.8, 1.4);
+  body.position.set(0, 0.32, 0);
+  g.add(body);
+  // Legs (4 short cylinders)
+  for (const sx of [-0.18, 0.18]) {
+    for (const sz of [-0.3, 0.25]) {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.22, 6), fur);
+      leg.position.set(sx, 0.13, sz);
+      g.add(leg);
+    }
+  }
+  // Head
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 9), fur);
+  head.position.set(0, 0.55, 0.32);
+  g.add(head);
+  // Muzzle
+  const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), fur);
+  muzzle.scale.set(0.9, 0.7, 1.2);
+  muzzle.position.set(0, 0.5, 0.48);
+  g.add(muzzle);
+  // Nose
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 6), noseMat);
+  nose.position.set(0, 0.53, 0.6);
+  g.add(nose);
+  // Eyes
+  for (const sx of [-0.08, 0.08]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 6), eyeMat);
+    eye.position.set(sx, 0.62, 0.48);
+    g.add(eye);
+  }
+  // Floppy ears
+  for (const sx of [-0.18, 0.18]) {
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 6), darkFur);
+    ear.scale.set(0.5, 0.8, 0.3);
+    ear.position.set(sx, 0.6, 0.24);
+    ear.rotation.z = sx > 0 ? -0.4 : 0.4;
+    g.add(ear);
+  }
+  // Tail (wagging baseline)
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.4, 6), fur);
+  tail.rotation.x = -0.6;
+  tail.position.set(0, 0.5, -0.38);
+  g.add(tail);
+  g.userData.tail = tail;
+  g.userData.bobPhase = Math.random() * Math.PI * 2;
+  return g;
+}
+
+// Called from killEnemy when the red circle "dies"
+function onRedCircleDestroyed(targetMesh) {
+  if (ROCKET_INT.phase !== 'bomb') return;
+  // Visual: replace target with smoking ring
+  if (targetMesh) {
+    targetMesh.visible = false;
+  }
+  // Drop a glowing key
+  const key = new THREE.Group();
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.04, 0.04, 0.3, 8),
+    new THREE.MeshStandardMaterial({ color: 0xffd040, metalness: 0.85, roughness: 0.25, emissive: 0xa07020, emissiveIntensity: 0.7 })
+  );
+  shaft.rotation.x = Math.PI / 2;
+  key.add(shaft);
+  const head = new THREE.Mesh(
+    new THREE.TorusGeometry(0.1, 0.025, 8, 20),
+    new THREE.MeshStandardMaterial({ color: 0xffd040, metalness: 0.85, roughness: 0.25, emissive: 0xa07020, emissiveIntensity: 0.8 })
+  );
+  head.rotation.y = Math.PI / 2;
+  head.position.set(0, 0, -0.18);
+  key.add(head);
+  const tooth = new THREE.Mesh(
+    new THREE.BoxGeometry(0.04, 0.08, 0.04),
+    new THREE.MeshStandardMaterial({ color: 0xffd040, metalness: 0.85, roughness: 0.25, emissive: 0xa07020, emissiveIntensity: 0.7 })
+  );
+  tooth.position.set(0, -0.06, 0.12);
+  key.add(tooth);
+  // Glow halo
+  const halo = new THREE.PointLight(0xffd060, 2.5, 6, 2);
+  key.add(halo);
+  key.userData.halo = halo;
+  key.position.set(0, 1.2, -8);    // a bit forward from where the target was
+  scene.add(key);
+  ROCKET_INT.key = key;
+  ROCKET_INT.phase = 'fetch-key';
+  showMessage('A KEY! GRAB IT! 🔑', 3000);
+}
+
+// Click/FIRE interaction when on rocket-interior
+function rocketInteract() {
+  if (ROCKET_INT.phase !== 'kennel') return;
+  // Find the closest still-locked cage within range
+  let best = null, bestDist = 2.4;
+  for (const c of ROCKET_INT.cages) {
+    if (c.opened) continue;
+    const dx = camera.position.x - c.x;
+    const dz = camera.position.z - c.z;
+    const d = Math.sqrt(dx*dx + dz*dz);
+    if (d < bestDist) { bestDist = d; best = c; }
+  }
+  if (!best) return;
+  // Open the cage
+  best.opened = true;
+  ROCKET_INT.freed++;
+  // Remove front bars + lock
+  if (best.front) best.group.remove(best.front);
+  if (best.lock) best.lock.material.color.setHex(0x40ff60);
+  // Move the dog out of the cage into the corridor
+  best.dog.position.set(best.x > 0 ? -1.4 : 1.4, 0, 0);
+  best.dog.rotation.y = 0;
+  showMessage(`🐕 FREED ${ROCKET_INT.freed}/${ROCKET_INT.cages.length}!`, 1400);
+  if (ROCKET_INT.freed >= ROCKET_INT.cages.length) {
+    setTimeout(() => { if (!transitioning && !STATE.gameover) triggerEarthLanding(); }, 1500);
+  }
+}
+
+function triggerEarthLanding() {
+  transitioning = true;
+  document.exitPointerLock();
+  showMessage('ALL DOGS FREED! LANDING ON EARTH WITH THE PACK! 🌍🐕', 4000);
   const overlay = document.getElementById('transition-overlay');
   overlay.style.background = '#80c0ff';
   overlay.style.opacity = '0';
   setTimeout(() => { overlay.style.opacity = '1'; }, 1500);
   setTimeout(() => {
     overlay.style.background = '#000';
-    victoryGame();
-  }, 2600);
+    victoryGame();    // earth-theme victory (see victoryGame)
+  }, 2700);
+}
+
+function updateRocketInterior(dt) {
+  if (STATE.level !== 'rocket-interior') return;
+  const t = clock.getElapsedTime();
+
+  // Target eye pulse during bomb phase
+  if (ROCKET_INT.target && ROCKET_INT.target.visible && ROCKET_INT.target.userData.eye) {
+    const k = 0.7 + Math.sin(t * 6) * 0.3;
+    ROCKET_INT.target.userData.eye.scale.setScalar(k);
+  }
+
+  // Key hover/spin + auto-pickup on walk
+  if (ROCKET_INT.phase === 'fetch-key' && ROCKET_INT.key) {
+    ROCKET_INT.key.rotation.y += dt * 2.0;
+    ROCKET_INT.key.position.y = 1.2 + Math.sin(t * 2.5) * 0.12;
+    if (ROCKET_INT.key.userData.halo) {
+      ROCKET_INT.key.userData.halo.intensity = 2.0 + Math.sin(t * 5) * 1.0;
+    }
+    const dx = camera.position.x - ROCKET_INT.key.position.x;
+    const dz = camera.position.z - ROCKET_INT.key.position.z;
+    if (Math.sqrt(dx*dx + dz*dz) < 1.1) {
+      scene.remove(ROCKET_INT.key);
+      ROCKET_INT.key = null;
+      ROCKET_INT.keyHeld = true;
+      ROCKET_INT.phase = 'door';
+      // Door lock turns green
+      if (ROCKET_INT.door && ROCKET_INT.door.userData.lock) {
+        ROCKET_INT.door.userData.lock.material.color.setHex(0x40ff60);
+      }
+      showMessage('KEY ACQUIRED! THE DOOR UNLOCKS! 🔓', 3000);
+    }
+  }
+
+  // Door slides up when player approaches with the key
+  if (ROCKET_INT.phase === 'door' && ROCKET_INT.door && !ROCKET_INT.doorOpen) {
+    const dz = Math.abs(camera.position.z - 3);
+    if (dz < 2.5) {
+      ROCKET_INT.doorOpen = true;
+      // Animate the door panel sliding up
+      const startY = ROCKET_INT.door.position.y;
+      const startT = performance.now();
+      const slide = () => {
+        const tt = Math.min(1, (performance.now() - startT) / 1200);
+        ROCKET_INT.door.position.y = startY + tt * 3.0;
+        if (tt < 1) requestAnimationFrame(slide);
+        else {
+          ROCKET_INT.door.visible = false;
+          if (ROCKET_INT.door.userData.lock) ROCKET_INT.door.userData.lock.visible = false;
+          ROCKET_INT.phase = 'kennel';
+          showMessage('A KENNEL! FREE THE DOGS — CLICK/FIRE NEAR EACH CAGE! 🐕', 4500);
+        }
+      };
+      requestAnimationFrame(slide);
+    }
+  }
+
+  // Dogs in cages (and freed) — gentle bob + tail wag
+  for (const c of ROCKET_INT.cages) {
+    if (!c.dog) continue;
+    c.dog.position.y = (c.opened ? 0 : 0) + Math.sin(t * 3 + c.dog.userData.bobPhase) * 0.04;
+    if (c.dog.userData.tail) c.dog.userData.tail.rotation.z = Math.sin(t * 6 + c.dog.userData.bobPhase) * 0.6;
+  }
 }
 
 function buildCatShipHijack() {
@@ -5134,6 +5579,7 @@ function throwAmmo() {
   if (STATE.level === 'saturn-surface') return throwNail();
   if (STATE.level === 'jupiter-surface') return throwSpike();
   if (STATE.level === 'cat-ship-hijack') return;   // can't fire during hijack cinematic
+  if (STATE.level === 'rocket-interior') return rocketInteract();   // FIRE opens cages
   if (isSpaceLike(STATE.level)) return throwLaser();
   if (isOceanLike(STATE.level)) return throwDiamond();
   return throwBone();
@@ -5749,6 +6195,31 @@ function updateProjectiles(dt) {
         updateBossHud(enemy);
         if (enemy.userData.health <= 0) triggerBossDeath(j);
         else                            flashWeakPoint(enemy);
+        scene.remove(p);
+        PROJECTILES.splice(i, 1);
+        consumed = true;
+        break;
+      }
+      // Red circle target — only missiles destroy it. Anything else is absorbed harmlessly.
+      if (enemy.userData.isRedCircle) {
+        const hitR = enemy.userData.hitRadius || 1.2;
+        // Broad-phase check
+        const dx = p.position.x - enemy.position.x;
+        const dy = p.position.y - enemy.position.y;
+        const dz = p.position.z - enemy.position.z;
+        if (dx*dx + dy*dy + dz*dz > hitR * hitR) continue;
+        if (p.userData.isMissile) {
+          // Boom! Destroy the target, drop a key.
+          spawnExplosionFlash(p.position.clone());
+          onRedCircleDestroyed(enemy);
+          // Remove from ENEMIES so subsequent shots don't hit it
+          const idx = ENEMIES.indexOf(enemy);
+          if (idx !== -1) ENEMIES.splice(idx, 1);
+        } else {
+          // Wrong weapon — bounce off harmlessly
+          spawnBossSparks(p.position.clone(), 0xff8040);
+          showMessage('USE A BOMB (F KEY)!', 1100);
+        }
         scene.remove(p);
         PROJECTILES.splice(i, 1);
         consumed = true;
@@ -6913,7 +7384,11 @@ function victoryGame() {
   const t = document.getElementById('victory-title');
   const s1 = document.getElementById('victory-sub1');
   const s2 = document.getElementById('victory-sub2');
-  if (STATE.level === 'mars-surface') {
+  if (STATE.level === 'rocket-interior') {
+    if (t) t.textContent = 'EARTH!';
+    if (s1) s1.textContent = 'PACK FREED • SOFT LANDING ON HOME SOIL';
+    if (s2) s2.textContent = `…the Earth level is coming — get the dogs home • ${STATE.diamonds} 💎`;
+  } else if (STATE.level === 'mars-surface') {
     if (t) t.textContent = 'EARTH BOUND!';
     if (s1) s1.textContent = 'POSSESSED ROVERS DEFEATED • ROCKET LAUNCHED';
     if (s2) s2.textContent = `HOME IS WAITING • ${STATE.diamonds} 💎`;
@@ -7003,6 +7478,9 @@ function loadNextRoom() {
     PLUTO_CRACKS.length = 0;
     JUPITER_DIG.mesh = null; JUPITER_DIG.active = false;
     MARS_EARTH_ROCKET.mesh = null; MARS_EARTH_ROCKET.active = false;
+    ROCKET_INT.target = null; ROCKET_INT.key = null; ROCKET_INT.door = null;
+    ROCKET_INT.cages.length = 0; ROCKET_INT.freed = 0;
+    ROCKET_INT.phase = 'bomb'; ROCKET_INT.keyHeld = false; ROCKET_INT.doorOpen = false;
     scene.userData = {};
     portalActive = false;
 
@@ -7040,6 +7518,7 @@ function loadNextRoom() {
       'cat-ship-hijack':  'TRAPPED IN A CAT SHIP CAGE… 😾',
       'mars-approach':    'MARS APPROACH! LIT MOTHERSHIPS — SHOOT THEIR DARK SPOT! 🔴',
       'mars-surface':     'MARS! EVIL DUST STORMS! POSSESSED ROVERS! RED SPACE LASER! 🔴🤖😾',
+      'rocket-interior':  'BOMB THE RED CIRCLE (F KEY) — FREE THE DOGS BEHIND THE DOOR! 💣🔑🐕',
       'dungeon':          `ROOM ${currentRoom} — SPOOKIER IN HERE...`,
     };
     showMessage(intro[STATE.level] || '', 3500);
@@ -7790,7 +8269,7 @@ function updateHUD() {
   const inSpace = isSpaceLike(STATE.level);
   const isDirtLevel  = STATE.level === 'neptune-surface';
   const isLaserLevel = inSpace && !isDirtLevel;
-  const isMissileLevel = STATE.level === 'saturn-approach';
+  const isMissileLevel = STATE.level === 'saturn-approach' || STATE.level === 'rocket-interior';
   const isNailLevel    = STATE.level === 'saturn-surface';
   const isSpikeLevel   = STATE.level === 'jupiter-surface';
   document.getElementById('bones-display').style.display    = (!inOcean && !inSpace) ? 'block' : 'none';
@@ -8030,6 +8509,9 @@ function rebuildLevel(fromBeginning) {
   PLUTO_CRACKS.length = 0;
   JUPITER_DIG.mesh = null; JUPITER_DIG.active = false;
   MARS_EARTH_ROCKET.mesh = null; MARS_EARTH_ROCKET.active = false;
+  ROCKET_INT.target = null; ROCKET_INT.key = null; ROCKET_INT.door = null;
+  ROCKET_INT.cages.length = 0; ROCKET_INT.freed = 0;
+  ROCKET_INT.phase = 'bomb'; ROCKET_INT.keyHeld = false; ROCKET_INT.doorOpen = false;
 
   scene.userData = {};
 
@@ -8219,6 +8701,15 @@ function buildLevel(level) {
     buildMarsSurface();
     spawnGroundMedkits(diff().treatBase + 2);
     spawnGroundLaserPacks(4);
+  } else if (level === 'rocket-interior') {
+    scene.fog = null;
+    renderer.setClearColor(0x101418);
+    camera.position.set(0, PLAYER_HEIGHT, -4);
+    playerYaw = 0;     // facing front bulkhead (negative Z)
+    swapHeldToBlaster();
+    setSpacesuitVisor(false);
+    if (STATE.missiles < 6) STATE.missiles = 6;
+    buildRocketInterior();
   }
 }
 
@@ -8254,6 +8745,7 @@ const DEV_ROOMS = [
   { room: 15, label: 'Room 15 — Cat Ship Hijack' },
   { room: 16, label: 'Room 16 — Mars Approach (Motherships)' },
   { room: 17, label: 'Room 17 — Mars Surface (Rovers + Earth Rocket)' },
+  { room: 18, label: 'Room 18 — Rocket Interior (Bomb + Free Dogs)' },
 ];
 
 function toggleDevMenu() {
@@ -8305,8 +8797,9 @@ const WAVES_PER_ROOM = 3; // clear 3 waves to unlock the door
 
 function updateSpawner(dt) {
   if (STATE.gameover || roomCleared) return;
-  // Cat ship is a scripted cinematic — no waves
+  // Scripted-cinematic levels — no wave spawns
   if (STATE.level === 'cat-ship-hijack') return;
+  if (STATE.level === 'rocket-interior') return;
   // Neptune is a one-and-done boss fight: spawn the boss exactly once
   if (STATE.level === 'neptune-approach') {
     if (waveNumber === 0) {
@@ -8463,6 +8956,7 @@ function loop() {
   updateSaturnWind(dt);
   updateJupiterStorm(dt);
   updateMarsStorm(dt);
+  updateRocketInterior(dt);
   updateCatShipHijack(dt);
   updateParticles(dt);
   updateExplosions(dt);
