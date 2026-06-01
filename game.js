@@ -183,6 +183,9 @@ function isTouchDevice() {
 function pauseGame() {
   if (!STATE.started || STATE.gameover || STATE.paused || transitioning) return;
   STATE.paused = true;
+  // Suspend the whole AudioContext — pauses music *and* any in-flight SFX
+  // without losing the scheduler state, so resume picks up exactly where we left off.
+  if (AUDIO.ctx && AUDIO.ctx.state === 'running') AUDIO.ctx.suspend();
   try { document.exitPointerLock(); } catch (e) {}
   TOUCH.moveX = 0; TOUCH.moveZ = 0; TOUCH.lookX = 0; TOUCH.lookY = 0;
   // Stop any auto-fire intervals that the touch FIRE button might be running
@@ -197,6 +200,7 @@ function pauseGame() {
 function resumeGame() {
   if (!STATE.paused) return;
   STATE.paused = false;
+  if (AUDIO.ctx && AUDIO.ctx.state === 'suspended') AUDIO.ctx.resume();
   const pm = document.getElementById('pause-menu');
   if (pm) pm.style.display = 'none';
   const sp = document.getElementById('settings-panel');
@@ -219,6 +223,21 @@ function initPauseMenu() {
   bindBtn('pause-resume', resumeGame);
   bindBtn('pause-restart-level', () => { resumeGame(); restartLevel(); });
   bindBtn('pause-restart-game',  () => { resumeGame(); restartGame(); });
+  // Dev menu access from the pause menu — works regardless of whether the
+  // backtick key is reachable on the user's keyboard / browser shortcut layer.
+  bindBtn('pause-dev-menu', () => {
+    // Hide pause overlay but stay paused so the dev menu sits cleanly on top
+    const pm = document.getElementById('pause-menu');
+    if (pm) pm.style.display = 'none';
+    const sp = document.getElementById('settings-panel');
+    if (sp) sp.style.display = 'none';
+    // Open the dev menu — its warpToRoom call will rebuild the level and unpause
+    const devEl = document.getElementById('dev-menu');
+    if (devEl) {
+      renderDevMenu();
+      devEl.style.display = 'block';
+    }
+  });
   bindBtn('pause-settings', () => {
     const sp = document.getElementById('settings-panel');
     if (sp) sp.style.display = (sp.style.display === 'block') ? 'none' : 'block';
@@ -8538,14 +8557,26 @@ function updateSpaceProgress(dt) {
   if (charon) charon.position.z += dz * dt;
   planet.rotation.y += dt * 0.05;
 
-  // Grow planet as it gets closer
+  // Grow planet as it gets closer. The raw planet radius is 4; we cap the scale
+  // so the near surface (z = -dist + 4*scale) never reaches the camera at z=0 —
+  // otherwise the camera ends up *inside* the sphere and renders empty space
+  // through back-face culling, which is what made crashes look like passing
+  // through the planet.
   const dist = -planet.position.z;
   const baseDist = 160;
-  const scale = Math.max(1, baseDist / Math.max(dist, 4));
+  const PLANET_R = 4;
+  const SAFETY = 1.5;   // metres between camera and planet surface
+  const wantedScale = baseDist / Math.max(dist, 4);
+  const maxScale = Math.max(1, (dist - SAFETY) / PLANET_R);
+  const scale = Math.max(1, Math.min(wantedScale, maxScale));
   planet.scale.setScalar(scale);
 
-  // Trigger landing when planet is on top of the cockpit
-  if (phase === 'approach' && dist < 8 && !transitioning) {
+  // Trigger landing while the camera is still outside the sphere. With the cap
+  // above, the planet's near surface stays SAFETY metres away — we fire when
+  // that distance closes to a few metres so the visual reads as 'crashing
+  // into the surface' rather than 'flying past it'.
+  const surfaceDist = dist - scale * PLANET_R;   // distance from camera to planet surface
+  if (phase === 'approach' && surfaceDist < 3 && !transitioning) {
     if (target === 'neptune')      triggerNeptuneLanding();
     else if (target === 'saturn')  triggerSaturnCrash();
     else if (target === 'mars')    triggerMarsLanding();
@@ -10326,6 +10357,13 @@ function renderDevMenu() {
 
 function warpToRoom(roomNum) {
   document.getElementById('dev-menu').style.display = 'none';
+  // Warping from the pause-menu dev button — make sure we unpause cleanly too.
+  if (STATE.paused) {
+    STATE.paused = false;
+    if (AUDIO.ctx && AUDIO.ctx.state === 'suspended') AUDIO.ctx.resume();
+    const pm = document.getElementById('pause-menu');
+    if (pm) pm.style.display = 'none';
+  }
   currentRoom = roomNum;
   STATE.level = levelForRoom(roomNum) || 'dungeon';
   // rebuildLevel sets ammo + health based on STATE.level
