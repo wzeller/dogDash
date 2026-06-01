@@ -183,9 +183,20 @@ function isTouchDevice() {
 function pauseGame() {
   if (!STATE.started || STATE.gameover || STATE.paused || transitioning) return;
   STATE.paused = true;
-  // Suspend the whole AudioContext — pauses music *and* any in-flight SFX
-  // without losing the scheduler state, so resume picks up exactly where we left off.
-  if (AUDIO.ctx && AUDIO.ctx.state === 'running') AUDIO.ctx.suspend();
+  // Belt-and-suspenders silence:
+  //   1. Cut the music gain to zero immediately (works even if suspend lags)
+  //   2. Stop the music scheduler so no new notes queue up
+  //   3. Suspend the AudioContext (freezes everything else)
+  if (MUSIC.themeGain && AUDIO.ctx) {
+    try {
+      MUSIC.themeGain.gain.cancelScheduledValues(AUDIO.ctx.currentTime);
+      MUSIC.themeGain.gain.setValueAtTime(0, AUDIO.ctx.currentTime);
+    } catch (e) {}
+  }
+  if (MUSIC.schedTimer) { clearInterval(MUSIC.schedTimer); MUSIC.schedTimer = null; }
+  if (AUDIO.ctx && AUDIO.ctx.state === 'running') {
+    try { AUDIO.ctx.suspend(); } catch (e) {}
+  }
   try { document.exitPointerLock(); } catch (e) {}
   TOUCH.moveX = 0; TOUCH.moveZ = 0; TOUCH.lookX = 0; TOUCH.lookY = 0;
   // Stop any auto-fire intervals that the touch FIRE button might be running
@@ -200,7 +211,25 @@ function pauseGame() {
 function resumeGame() {
   if (!STATE.paused) return;
   STATE.paused = false;
-  if (AUDIO.ctx && AUDIO.ctx.state === 'suspended') AUDIO.ctx.resume();
+  if (AUDIO.ctx && AUDIO.ctx.state === 'suspended') {
+    try { AUDIO.ctx.resume(); } catch (e) {}
+  }
+  // Restart the music scheduler from "now" and ramp the gain back up.
+  if (MUSIC.themeName && AUDIO.ctx) {
+    const t = THEMES[MUSIC.themeName];
+    if (MUSIC.themeGain && t) {
+      try {
+        MUSIC.themeGain.gain.cancelScheduledValues(AUDIO.ctx.currentTime);
+        MUSIC.themeGain.gain.setValueAtTime(0, AUDIO.ctx.currentTime);
+        MUSIC.themeGain.gain.linearRampToValueAtTime(t.gain || 0.15, AUDIO.ctx.currentTime + 0.5);
+      } catch (e) {}
+    }
+    MUSIC.nextTime = AUDIO.ctx.currentTime + 0.08;
+    if (!MUSIC.schedTimer) {
+      scheduleAhead();
+      MUSIC.schedTimer = setInterval(scheduleAhead, 60);
+    }
+  }
   const pm = document.getElementById('pause-menu');
   if (pm) pm.style.display = 'none';
   const sp = document.getElementById('settings-panel');
