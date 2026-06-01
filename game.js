@@ -262,6 +262,7 @@ function initPauseMenu() {
     mute.addEventListener('change', () => {
       AUDIO.muted = mute.checked;
       localStorage.setItem('dd_mute', AUDIO.muted ? '1' : '0');
+      applyMute();
     });
   }
 }
@@ -462,6 +463,7 @@ function initAudio() {
     AUDIO.master.gain.value = isNaN(savedVol) ? 0.35 : savedVol;
     AUDIO.master.connect(AUDIO.ctx.destination);
     AUDIO.muted = localStorage.getItem('dd_mute') === '1';
+    if (AUDIO.muted && typeof applyMute === 'function') applyMute();
   } catch (e) { /* browser without WebAudio — silent */ }
 }
 
@@ -508,6 +510,207 @@ function playSound(kind) {
     case 'door':    tone(140, 360, 0.30, 'sine',     0.20); break;
     case 'explode': noise(0.4, 0.45, 800); tone(90, 30, 0.45, 'sawtooth', 0.4); break;
     case 'car':     tone(220, 180, 0.12, 'square',   0.20); break;
+  }
+}
+
+// ─── Procedural music engine ─────────────────────────────────────────────────
+// Themed 16-step loops (bass + lead + drum). Lookahead scheduler keeps
+// upcoming notes queued on the Web Audio timeline so timing stays tight
+// regardless of JS frame jitter.
+const MUSIC = {
+  themeName: null,
+  themeGain: null,
+  schedTimer: null,
+  step: 0,
+  nextTime: 0,
+};
+
+// MIDI helper. midiHz(69) = 440 Hz.
+const midiHz = (n) => 440 * Math.pow(2, (n - 69) / 12);
+
+// Each theme: 16-step bass / lead / drum patterns, BPM, oscillator types.
+// A note value of 0 = rest. Drum value of 1 = kick on this step.
+const THEMES = {
+  // Dungeon — slow, eerie, minor key. Sparse bass + occasional dissonant lead.
+  dungeon: {
+    bpm: 70, gain: 0.16,
+    bass: [33,0,0,0,  0,0,0,0,  36,0,0,0,  31,0,0,0],
+    lead: [0,0,0,0,  69,0,0,0,  0,0,72,0,  0,0,71,0],
+    drum: [1,0,0,0,  0,0,1,0,  1,0,0,0,  0,0,1,0],
+    bassType: 'sawtooth', leadType: 'sine', drumLP: 600,
+  },
+  // Ocean / pirate ship — bright, swaying, mid-tempo, major key (D)
+  nautical: {
+    bpm: 100, gain: 0.14,
+    bass: [38,0,0,38,  0,45,0,0,  42,0,0,42,  0,45,0,38],
+    lead: [62,0,66,0,  69,0,66,62, 64,0,69,0,  66,64,62,0],
+    drum: [1,0,0,1,   0,0,1,0,    1,0,0,1,   0,0,1,0],
+    bassType: 'triangle', leadType: 'square', drumLP: 1200,
+  },
+  // Synthwave — driving cockpit / approach levels. E minor, fast, arpeggio.
+  synthwave: {
+    bpm: 124, gain: 0.13,
+    bass: [40,40,40,0,  40,0,35,0,  40,40,40,0,  33,33,35,0],
+    lead: [76,71,67,71, 76,79,76,71, 74,71,67,71, 69,71,74,71],
+    drum: [1,0,1,0,   1,0,1,0,    1,0,1,0,   1,0,1,0],
+    bassType: 'sawtooth', leadType: 'square', drumLP: 1600,
+  },
+  // Cold / lonely surface — Pluto, Mars, Uranus surfaces. Sparse pads in C minor.
+  cold: {
+    bpm: 78, gain: 0.13,
+    bass: [36,0,0,0,  41,0,0,0,  43,0,0,0,  36,0,0,0],
+    lead: [60,0,0,0,  63,0,0,0,  67,0,65,0, 60,0,0,0],
+    drum: [1,0,0,0,  0,0,0,0,  1,0,0,0,  0,0,1,0],
+    bassType: 'triangle', leadType: 'sine', drumLP: 400,
+  },
+  // Storm / chaotic — Saturn surface, Jupiter surface. F minor, fast.
+  storm: {
+    bpm: 118, gain: 0.13,
+    bass: [29,29,0,29, 32,0,29,0, 29,29,0,29, 34,0,32,0],
+    lead: [65,68,72,68, 65,72,77,72, 65,68,72,68, 70,65,68,65],
+    drum: [1,0,1,0,  1,1,0,1,  1,0,1,0,  1,0,1,1],
+    bassType: 'sawtooth', leadType: 'sawtooth', drumLP: 2200,
+  },
+  // Cinematic — slow drama. Cat-ship hijack, rocket interior.
+  cinematic: {
+    bpm: 64, gain: 0.16,
+    bass: [33,0,0,0,  0,0,0,0,  38,0,0,0,  0,0,0,0],
+    lead: [0,0,69,0,  0,0,71,0, 0,0,72,0,  0,0,69,0],
+    drum: [1,0,0,1,  0,0,1,0,  1,0,0,1,  0,0,1,0],
+    bassType: 'square', leadType: 'triangle', drumLP: 700,
+  },
+  // Earth homecoming — warm, hopeful, major key (G).
+  home: {
+    bpm: 88, gain: 0.14,
+    bass: [43,0,0,43,  0,0,0,0,  36,0,0,36,  0,0,0,0],
+    lead: [67,0,71,0,  74,71,67,0,  72,0,76,0,  74,72,67,0],
+    drum: [1,0,0,0,  1,0,0,0,  1,0,0,0,  1,0,0,1],
+    bassType: 'triangle', leadType: 'triangle', drumLP: 1400,
+  },
+};
+
+function startMusic(themeName) {
+  if (!themeName) { stopMusic(); return; }
+  if (MUSIC.themeName === themeName) return;
+  initAudio();
+  if (!AUDIO.ctx || !AUDIO.master) return;
+  stopMusic();
+  const t = THEMES[themeName];
+  if (!t) return;
+  MUSIC.themeName = themeName;
+  MUSIC.step = 0;
+  MUSIC.nextTime = AUDIO.ctx.currentTime + 0.08;
+  MUSIC.themeGain = AUDIO.ctx.createGain();
+  MUSIC.themeGain.gain.setValueAtTime(0, AUDIO.ctx.currentTime);
+  MUSIC.themeGain.gain.linearRampToValueAtTime(t.gain || 0.15, AUDIO.ctx.currentTime + 1.0);
+  MUSIC.themeGain.connect(AUDIO.master);
+  scheduleAhead();
+  MUSIC.schedTimer = setInterval(scheduleAhead, 60);
+}
+
+function stopMusic() {
+  if (MUSIC.schedTimer) { clearInterval(MUSIC.schedTimer); MUSIC.schedTimer = null; }
+  if (MUSIC.themeGain && AUDIO.ctx) {
+    const g = MUSIC.themeGain;
+    const now = AUDIO.ctx.currentTime;
+    try {
+      g.gain.cancelScheduledValues(now);
+      g.gain.setValueAtTime(g.gain.value, now);
+      g.gain.linearRampToValueAtTime(0, now + 0.35);
+    } catch (e) {}
+    setTimeout(() => { try { g.disconnect(); } catch (e) {} }, 500);
+  }
+  MUSIC.themeGain = null;
+  MUSIC.themeName = null;
+}
+
+function scheduleAhead() {
+  if (!MUSIC.themeName || !AUDIO.ctx) return;
+  const t = THEMES[MUSIC.themeName];
+  if (!t) return;
+  const stepDur = 60 / t.bpm / 4;   // sixteenth-note length
+  while (MUSIC.nextTime < AUDIO.ctx.currentTime + 0.25) {
+    musicStep(t, MUSIC.step % 16, MUSIC.nextTime);
+    MUSIC.nextTime += stepDur;
+    MUSIC.step++;
+  }
+}
+
+function musicStep(theme, step, when) {
+  const dest = MUSIC.themeGain;
+  if (!dest) return;
+  const ctx = AUDIO.ctx;
+  // Bass
+  const bn = theme.bass[step];
+  if (bn) musicSynth(midiHz(bn), when, 0.32, theme.bassType, 0.35, dest);
+  // Lead
+  const ln = theme.lead[step];
+  if (ln) musicSynth(midiHz(ln), when, 0.18, theme.leadType, 0.18, dest);
+  // Drum (kick)
+  if (theme.drum[step]) musicDrum(when, theme.drumLP || 1200, 0.10, dest);
+}
+
+function musicSynth(freq, when, dur, type, peak, dest) {
+  const ctx = AUDIO.ctx;
+  const osc = ctx.createOscillator();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, when);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, when);
+  g.gain.linearRampToValueAtTime(peak, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.001, when + dur);
+  osc.connect(g); g.connect(dest);
+  osc.start(when); osc.stop(when + dur + 0.05);
+}
+
+function musicDrum(when, lpHz, dur, dest) {
+  const ctx = AUDIO.ctx;
+  const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = lpHz;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.32, when);
+  g.gain.exponentialRampToValueAtTime(0.001, when + dur);
+  src.connect(filt); filt.connect(g); g.connect(dest);
+  src.start(when); src.stop(when + dur + 0.05);
+}
+
+// Apply the mute flag to the audio master — silences SFX *and* music.
+let _savedMasterGain = null;
+function applyMute() {
+  if (!AUDIO.ctx || !AUDIO.master) return;
+  if (AUDIO.muted) {
+    _savedMasterGain = AUDIO.master.gain.value;
+    AUDIO.master.gain.setValueAtTime(0, AUDIO.ctx.currentTime);
+  } else {
+    AUDIO.master.gain.setValueAtTime(_savedMasterGain ?? 0.35, AUDIO.ctx.currentTime);
+  }
+}
+
+// Map each level to a music theme.
+function themeForLevel(level) {
+  switch (level) {
+    case 'dungeon':           return 'dungeon';
+    case 'ocean-surface':
+    case 'ocean-underwater':
+    case 'pirate-ship':       return 'nautical';
+    case 'space-cockpit':
+    case 'neptune-approach':
+    case 'saturn-approach':
+    case 'mars-approach':     return 'synthwave';
+    case 'pluto-surface':
+    case 'mars-surface':
+    case 'uranus-surface':    return 'cold';
+    case 'neptune-surface':
+    case 'saturn-surface':
+    case 'jupiter-surface':   return 'storm';
+    case 'cat-ship-hijack':
+    case 'rocket-interior':   return 'cinematic';
+    case 'earth':             return 'home';
+    default:                  return null;
   }
 }
 
@@ -746,6 +949,7 @@ function init() {
     if (e.code === 'KeyM') {
       AUDIO.muted = !AUDIO.muted;
       localStorage.setItem('dd_mute', AUDIO.muted ? '1' : '0');
+      applyMute();
       const mc = document.getElementById('set-mute'); if (mc) mc.checked = AUDIO.muted;
       showMessage(AUDIO.muted ? '🔇 MUTED' : '🔊 SOUND ON', 1000);
       return;
@@ -8657,6 +8861,7 @@ function victoryGame() {
   transitioning = true;
   STATE.gameover = true;  // freeze gameplay
   playSound('victory');
+  stopMusic();
   try { document.exitPointerLock(); } catch (e) { /* no-op on touch */ }
   hideAllOverlaysExceptGameOver();
   TOUCH.moveX = 0; TOUCH.moveZ = 0; TOUCH.lookX = 0; TOUCH.lookY = 0;
@@ -9748,6 +9953,7 @@ function showMessage(text, duration = 2000) {
 function gameOver() {
   STATE.gameover = true;
   playSound('death');
+  stopMusic();
   try { document.exitPointerLock(); } catch (e) { /* no-op on touch */ }
   // Hide everything that could obscure the game-over overlay on mobile
   hideAllOverlaysExceptGameOver();
@@ -9866,6 +10072,8 @@ function buildLevel(level) {
   // Boss HUD is only shown during the Neptune fight — the spawner re-shows it
   const bossWrap = document.getElementById('boss-bar-wrap');
   if (bossWrap) bossWrap.style.display = 'none';
+  // Swap music to the level's theme (cross-fades automatically; no-op if same)
+  startMusic(themeForLevel(level));
   if (level === 'dungeon') {
     scene.fog = new THREE.FogExp2(0x0a0005, 0.07);
     renderer.setClearColor(0x050005);
@@ -9908,10 +10116,10 @@ function buildLevel(level) {
     playerYaw = 0; playerPitch = 0;
     swapHeldToLaser();
     setSpacesuitVisor(false);
-    if (STATE.lasers === 0) STATE.lasers = 24;
+    if (STATE.lasers < 30) STATE.lasers = 50;   // bumped up for the Pluto run
     buildSpaceCockpit();
     spawnSpaceHealthPacks(5);
-    spawnSpaceLaserPacks(4);
+    spawnSpaceLaserPacks(8);                     // was 4
   } else if (level === 'pluto-surface') {
     scene.fog = new THREE.FogExp2(0x081020, 0.02);
     renderer.setClearColor(0x020414);
@@ -10342,6 +10550,8 @@ window.startGame = function (difficulty) {
   document.getElementById('start-screen').style.display = 'none';
   STATE.started = true;
   clock.start();
+  // Kick off the dungeon theme — initial-level path bypasses buildLevel
+  startMusic(themeForLevel(STATE.level));
   // Auto-lock the cursor — we're inside the FETCH click handler, which is a valid user gesture.
   // pointerlockchange will show the hint if the browser refuses or the user presses Esc.
   lockPointer();
