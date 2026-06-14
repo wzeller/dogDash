@@ -122,6 +122,24 @@ function levelBounds(level) {
   return [DUNGEON_BOUND, DUNGEON_BOUND];
 }
 
+// Walkable ground height for levels whose terrain plane is vertex-displaced.
+// These are analytic copies of the displacement in buildJupiterSurface /
+// buildMarsSurface and MUST stay in sync with them. The per-vertex random
+// jitter there (±9 cm) is deliberately omitted. The builders displace plane
+// local z then rotate x by -π/2, which maps plane-local (x, y) to world
+// (x, -z) — hence the flipped sign on the z terms.
+// Other bumpy levels (saturn/uranus/pluto, seafloor) keep amplitudes ≤ 0.5 and
+// stay flat for gameplay, so they return 0 here.
+function terrainHeightAt(x, z, level = STATE.level) {
+  if (level === 'jupiter-surface') {
+    return Math.sin(x * 0.3) * 0.4 + Math.cos(z * 0.5) * 0.3 + Math.sin(x * 0.12 - z * 0.18) * 0.7;
+  }
+  if (level === 'mars-surface') {
+    return Math.sin(x * 0.25) * 0.5 + Math.cos(z * 0.3) * 0.4 + Math.sin(x * 0.08 - z * 0.12) * 0.9;
+  }
+  return 0;
+}
+
 const KEYS = {};
 const MOUSE = { x: 0, y: 0, dx: 0, dy: 0, locked: false };
 
@@ -133,6 +151,11 @@ const SCRATCH = {
   vC: new THREE.Vector3(),
   vD: new THREE.Vector3(),
 };
+// Dedicated temps for updatePlayer — kept separate from SCRATCH because calls
+// made mid-frame (damagePlayer → HUD etc.) must never alias the movement vector.
+const PLAYER_MOVE = new THREE.Vector3();
+const PLAYER_NEXT = new THREE.Vector3();
+const YAW_EULER = new THREE.Euler();
 const MAX_PARTICLES = 80;   // hard cap on scene.userData.particles so explosions can't unbound the heap
 
 // Module-level materials reused across levels — never dispose these on
@@ -140,12 +163,24 @@ const MAX_PARTICLES = 80;   // hard cap on scene.userData.particles so explosion
 const PERSISTENT_MATS = new Set();
 function persistMat(m) { PERSISTENT_MATS.add(m); return m; }
 
+// Geometries shared by every spark / death particle / explosion / enemy laser.
+// Their cleanup paths only scene.remove() without dispose(), so per-spawn
+// geometries leaked GPU buffers for the whole session — sharing one geometry
+// per shape fixes both the leak and the per-spawn allocation churn.
+const PERSISTENT_GEOS = new Set();
+function persistGeo(g) { PERSISTENT_GEOS.add(g); return g; }
+const SPARK_GEO           = persistGeo(new THREE.SphereGeometry(0.07, 5, 4));
+const DEATH_PARTICLE_GEO  = persistGeo(new THREE.SphereGeometry(0.06, 4, 3));
+const EXPLOSION_FLASH_GEO = persistGeo(new THREE.SphereGeometry(0.6, 14, 10));
+const ENEMY_LASER_GEO     = persistGeo(new THREE.CylinderGeometry(0.06, 0.06, 0.8, 8));
+const ENEMY_LASER_MAT     = persistMat(new THREE.MeshBasicMaterial({ color: 0xff4060, transparent: true, opacity: 0.95 }));
+
 // Free GPU resources for everything under the given root (geometries + any
 // materials that aren't on the persistent list). Safe to call before
 // scene.remove(child) on each top-level scene child during a level switch.
 function disposeObjectTree(root) {
   root.traverse((node) => {
-    if (node.geometry) node.geometry.dispose();
+    if (node.geometry && !PERSISTENT_GEOS.has(node.geometry)) node.geometry.dispose();
     if (!node.material) return;
     const mats = Array.isArray(node.material) ? node.material : [node.material];
     for (const m of mats) {
@@ -177,6 +212,27 @@ function isTouchDevice() {
   const hasTouchPoints = (navigator.maxTouchPoints || 0) > 0;
   const coarsePrimary = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
   return hasTouchPoints && coarsePrimary;
+}
+
+// ─── Pause-safe timers ──────────────────────────────────────────────────────
+// setTimeout-driven gameplay beats (kidnap UFO, Earth landing) fire even while
+// the pause overlay is up, advancing the story behind the menu. gameTimeout
+// holds the callback if it lands during a pause and runs it on resume instead.
+// Callbacks are dropped if the level changed or the run ended in the meantime.
+const PENDING_GAME_TIMERS = [];
+function gameTimeout(fn, ms) {
+  const lvl = STATE.level;
+  return setTimeout(() => {
+    if (STATE.gameover || STATE.level !== lvl) return;
+    if (STATE.paused) { PENDING_GAME_TIMERS.push({ fn, lvl }); return; }
+    fn();
+  }, ms);
+}
+function flushPendingGameTimers() {
+  while (PENDING_GAME_TIMERS.length) {
+    const { fn, lvl } = PENDING_GAME_TIMERS.shift();
+    if (!STATE.gameover && STATE.level === lvl) fn();
+  }
 }
 
 // ─── Pause / Resume ─────────────────────────────────────────────────────────
@@ -211,6 +267,9 @@ function pauseGame() {
 function resumeGame() {
   if (!STATE.paused) return;
   STATE.paused = false;
+  // Drop any mouse deltas accrued around the pause boundary so the camera
+  // doesn't snap on the first resumed frame
+  MOUSE.dx = 0; MOUSE.dy = 0;
   if (AUDIO.ctx && AUDIO.ctx.state === 'suspended') {
     try { AUDIO.ctx.resume(); } catch (e) {}
   }
@@ -241,6 +300,8 @@ function resumeGame() {
   }
   // Re-engage pointer lock on desktop (we're inside a click event, valid gesture)
   if (!isTouchDevice()) lockPointer();
+  // Run any gameplay beats whose timers elapsed while the menu was up
+  flushPendingGameTimers();
 }
 
 function initPauseMenu() {
@@ -370,12 +431,12 @@ function initTouchControls() {
     let touchId = null;
     const start = (e) => {
       e.preventDefault(); e.stopPropagation();
-      if (!STATE.started || STATE.gameover) return;
+      if (!STATE.started || STATE.gameover || STATE.paused || transitioning) return;
       if (e.changedTouches && e.changedTouches[0]) touchId = e.changedTouches[0].identifier;
       action();
       if (timerId !== null) return;
       timerId = setInterval(() => {
-        if (!STATE.started || STATE.gameover) { stop(); return; }
+        if (!STATE.started || STATE.gameover || STATE.paused || transitioning) { stop(); return; }
         action();
       }, intervalMs);
     };
@@ -508,7 +569,7 @@ function initAudio() {
     AUDIO.ctx = new (window.AudioContext || window.webkitAudioContext)();
     AUDIO.master = AUDIO.ctx.createGain();
     const savedVol = parseFloat(localStorage.getItem('dd_vol'));
-    AUDIO.master.gain.value = isNaN(savedVol) ? 0.35 : savedVol;
+    AUDIO.master.gain.value = isNaN(savedVol) ? 0.35 : Math.min(1, Math.max(0, savedVol));
     AUDIO.master.connect(AUDIO.ctx.destination);
     AUDIO.muted = localStorage.getItem('dd_mute') === '1';
     if (AUDIO.muted && typeof applyMute === 'function') applyMute();
@@ -576,64 +637,99 @@ const MUSIC = {
 // MIDI helper. midiHz(69) = 440 Hz.
 const midiHz = (n) => 440 * Math.pow(2, (n - 69) / 12);
 
-// Each theme: 16-step bass / lead / drum patterns, BPM, oscillator types.
-// A note value of 0 = rest. Drum value of 1 = kick on this step.
+// Each theme is a set of equal-length step patterns (16 = one bar, 32 = two).
+// Layers: bass, lead, pad (sustained chord — fills the gaps so sparse themes
+// never sound silent), drum (kick), hat (hi-hat tick). A note value of 0 = rest;
+// drum/hat value of 1 = trigger. All arrays in a theme MUST be the same length.
+// padHold = how many steps a pad note sustains (defaults to 8).
 const THEMES = {
-  // Dungeon — slow, eerie, minor key. Sparse bass + occasional dissonant lead.
+  // Dungeon — slow, eerie, gothic minor (Am–F–C–E). Held pad gives it dread.
   dungeon: {
-    bpm: 70, gain: 0.16,
-    bass: [33,0,0,0,  0,0,0,0,  36,0,0,0,  31,0,0,0],
-    lead: [0,0,0,0,  69,0,0,0,  0,0,72,0,  0,0,71,0],
-    drum: [1,0,0,0,  0,0,1,0,  1,0,0,0,  0,0,1,0],
-    bassType: 'sawtooth', leadType: 'sine', drumLP: 600,
+    bpm: 72, gain: 0.16, padHold: 8,
+    bass: [33,0,0,0, 33,0,0,0, 29,0,0,0, 29,0,0,0,  36,0,0,0, 36,0,0,0, 28,0,0,0, 28,0,0,0],
+    lead: [0,0,0,0, 69,0,0,0, 0,0,72,0, 0,0,71,0,  72,0,0,0, 76,0,0,0, 74,0,0,71, 0,0,69,0],
+    pad:  [64,0,0,0,0,0,0,0, 60,0,0,0,0,0,0,0, 67,0,0,0,0,0,0,0, 59,0,0,0,0,0,0,0],
+    drum: [1,0,0,0,0,0,1,0, 1,0,0,0,0,0,1,0, 1,0,0,0,0,0,1,0, 1,0,0,0,0,0,1,0],
+    bassType: 'sawtooth', leadType: 'sine', padType: 'triangle', padGain: 0.07, drumLP: 600,
   },
-  // Ocean / pirate ship — bright, swaying, mid-tempo, major key (D)
+  // Ocean / pirate ship — bright, swaying sea-shanty in D major. 2-bar phrase.
   nautical: {
-    bpm: 100, gain: 0.14,
-    bass: [38,0,0,38,  0,45,0,0,  42,0,0,42,  0,45,0,38],
-    lead: [62,0,66,0,  69,0,66,62, 64,0,69,0,  66,64,62,0],
-    drum: [1,0,0,1,   0,0,1,0,    1,0,0,1,   0,0,1,0],
-    bassType: 'triangle', leadType: 'square', drumLP: 1200,
+    bpm: 104, gain: 0.15, padHold: 8,
+    bass: [38,0,38,0, 45,0,45,0, 43,0,43,0, 45,0,45,0,  38,0,38,0, 45,0,45,0, 43,0,42,0, 45,0,38,0],
+    lead: [62,0,66,0, 69,0,66,62, 64,0,69,0, 66,64,62,0,  69,0,71,0, 74,0,71,69, 66,0,69,0, 67,66,62,0],
+    pad:  [69,0,0,0,0,0,0,0, 64,0,0,0,0,0,0,0, 62,0,0,0,0,0,0,0, 64,0,0,0,0,0,0,0],
+    drum: [1,0,0,1,0,0,1,0, 1,0,0,1,0,0,1,0, 1,0,0,1,0,0,1,0, 1,0,0,1,0,0,1,0],
+    hat:  [0,0,1,0,0,0,1,0, 0,0,1,0,0,0,1,0, 0,0,1,0,0,0,1,0, 0,0,1,0,0,0,1,0],
+    bassType: 'triangle', leadType: 'square', padType: 'triangle', padGain: 0.06, drumLP: 1200, hatGain: 0.08,
   },
-  // Synthwave — driving cockpit / approach levels. E minor, fast, arpeggio.
+  // Abyss — ocean-underwater. Slow, deep, dreamy D-minor (Dm–F–Bb–C). All sines.
+  abyss: {
+    bpm: 66, gain: 0.15, padHold: 8,
+    bass: [38,0,0,0,0,0,0,0, 41,0,0,0,0,0,0,0, 34,0,0,0,0,0,0,0, 36,0,0,0,0,0,0,0],
+    lead: [0,0,0,0, 74,0,0,0, 0,0,0,0, 0,0,0,0,  77,0,0,0, 0,0,0,0, 69,0,0,72, 0,0,0,0],
+    pad:  [57,0,0,0,0,0,0,0, 60,0,0,0,0,0,0,0, 62,0,0,0,0,0,0,0, 55,0,0,0,0,0,0,0],
+    drum: [1,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 1,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0],
+    bassType: 'sine', leadType: 'sine', padType: 'sine', padGain: 0.08, drumLP: 300,
+  },
+  // Synthwave — driving cockpit / approach flights. E minor, fast arpeggio.
   synthwave: {
-    bpm: 124, gain: 0.13,
-    bass: [40,40,40,0,  40,0,35,0,  40,40,40,0,  33,33,35,0],
+    bpm: 126, gain: 0.13, padHold: 8,
+    bass: [40,40,40,0, 40,0,35,0, 40,40,40,0, 33,33,35,0],
     lead: [76,71,67,71, 76,79,76,71, 74,71,67,71, 69,71,74,71],
-    drum: [1,0,1,0,   1,0,1,0,    1,0,1,0,   1,0,1,0],
-    bassType: 'sawtooth', leadType: 'square', drumLP: 1600,
+    pad:  [59,0,0,0,0,0,0,0, 55,0,0,0,0,0,0,0],
+    drum: [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0],
+    hat:  [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,1],
+    bassType: 'sawtooth', leadType: 'square', padType: 'sawtooth', padGain: 0.05, drumLP: 1600, hatGain: 0.06,
   },
-  // Cold / lonely surface — Pluto, Mars, Uranus surfaces. Sparse pads in C minor.
+  // Cold / lonely surface — Pluto, Uranus. C minor (Cm–Ab–Eb–Bb), now with a pad
+  // so the long gaps read as "atmospheric" instead of "silent".
   cold: {
-    bpm: 78, gain: 0.13,
-    bass: [36,0,0,0,  41,0,0,0,  43,0,0,0,  36,0,0,0],
-    lead: [60,0,0,0,  63,0,0,0,  67,0,65,0, 60,0,0,0],
-    drum: [1,0,0,0,  0,0,0,0,  1,0,0,0,  0,0,1,0],
-    bassType: 'triangle', leadType: 'sine', drumLP: 400,
+    bpm: 80, gain: 0.15, padHold: 8,
+    bass: [36,0,0,0,0,0,0,0, 32,0,0,0,0,0,0,0, 39,0,0,0,0,0,0,0, 34,0,0,0,0,0,0,0],
+    lead: [0,0,0,0, 72,0,0,0, 0,0,0,0, 67,0,0,0,  75,0,0,0, 0,0,72,0, 70,0,0,0, 67,0,65,0],
+    pad:  [55,0,0,0,0,0,0,0, 63,0,0,0,0,0,0,0, 58,0,0,0,0,0,0,0, 65,0,0,0,0,0,0,0],
+    drum: [1,0,0,0,0,0,0,0, 1,0,0,0,0,0,0,0, 1,0,0,0,0,0,0,0, 1,0,0,0,0,0,1,0],
+    hat:  [0,0,0,0,0,0,1,0, 0,0,0,0,0,0,1,0, 0,0,0,0,0,0,1,0, 0,0,0,0,0,0,1,0],
+    bassType: 'triangle', leadType: 'sine', padType: 'triangle', padGain: 0.07, drumLP: 400, hatGain: 0.05,
   },
-  // Storm / chaotic — Saturn surface, Jupiter surface. F minor, fast.
+  // Storm / chaotic — Neptune, Saturn, Jupiter surfaces. F minor, fast & busy.
   storm: {
-    bpm: 118, gain: 0.13,
+    bpm: 120, gain: 0.14, padHold: 8,
     bass: [29,29,0,29, 32,0,29,0, 29,29,0,29, 34,0,32,0],
     lead: [65,68,72,68, 65,72,77,72, 65,68,72,68, 70,65,68,65],
-    drum: [1,0,1,0,  1,1,0,1,  1,0,1,0,  1,0,1,1],
-    bassType: 'sawtooth', leadType: 'sawtooth', drumLP: 2200,
+    pad:  [60,0,0,0,0,0,0,0, 56,0,0,0,0,0,0,0],
+    drum: [1,0,1,0, 1,1,0,1, 1,0,1,0, 1,0,1,1],
+    hat:  [1,0,1,1, 1,0,1,1, 1,0,1,1, 1,1,1,1],
+    bassType: 'sawtooth', leadType: 'sawtooth', padType: 'sawtooth', padGain: 0.05, drumLP: 2200, hatGain: 0.06,
   },
-  // Cinematic — slow drama. Cat-ship hijack, rocket interior.
+  // Martian — Mars surface. Ominous marching menace, D phrygian (the b2 Eb stab).
+  martian: {
+    bpm: 100, gain: 0.14, padHold: 8,
+    bass: [38,0,38,0, 38,0,39,0, 38,0,38,0, 41,0,40,0,  38,0,38,0, 38,0,39,0, 43,0,41,0, 38,0,38,0],
+    lead: [74,0,0,0, 75,0,74,0, 0,0,69,0, 70,0,69,0,  74,0,0,0, 77,0,75,0, 74,0,70,0, 69,0,0,0],
+    pad:  [62,0,0,0,0,0,0,0, 62,0,0,0,0,0,0,0, 62,0,0,0,0,0,0,0, 63,0,0,0,0,0,0,0],
+    drum: [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,1,0,1,  1,0,1,0, 1,0,1,0, 1,0,1,0, 1,1,0,1],
+    hat:  [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0,  0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,1,0],
+    bassType: 'sawtooth', leadType: 'square', padType: 'sawtooth', padGain: 0.06, drumLP: 1400, hatGain: 0.06,
+  },
+  // Cinematic — slow drama (cat-ship cage, rocket interior). Held pad carries it.
   cinematic: {
-    bpm: 64, gain: 0.16,
-    bass: [33,0,0,0,  0,0,0,0,  38,0,0,0,  0,0,0,0],
-    lead: [0,0,69,0,  0,0,71,0, 0,0,72,0,  0,0,69,0],
-    drum: [1,0,0,1,  0,0,1,0,  1,0,0,1,  0,0,1,0],
-    bassType: 'square', leadType: 'triangle', drumLP: 700,
+    bpm: 66, gain: 0.16, padHold: 8,
+    bass: [33,0,0,0,0,0,0,0, 38,0,0,0,0,0,0,0],
+    lead: [0,0,69,0,0,0,71,0, 0,0,72,0,0,0,69,0],
+    pad:  [57,0,0,0,0,0,0,0, 53,0,0,0,0,0,0,0],
+    drum: [1,0,0,1,0,0,1,0, 1,0,0,1,0,0,1,0],
+    bassType: 'square', leadType: 'triangle', padType: 'triangle', padGain: 0.08, drumLP: 700,
   },
-  // Earth homecoming — warm, hopeful, major key (G).
+  // Earth homecoming — warm, hopeful G major (G–D–Em–C). 2-bar lift at the end.
   home: {
-    bpm: 88, gain: 0.14,
-    bass: [43,0,0,43,  0,0,0,0,  36,0,0,36,  0,0,0,0],
-    lead: [67,0,71,0,  74,71,67,0,  72,0,76,0,  74,72,67,0],
-    drum: [1,0,0,0,  1,0,0,0,  1,0,0,0,  1,0,0,1],
-    bassType: 'triangle', leadType: 'triangle', drumLP: 1400,
+    bpm: 92, gain: 0.15, padHold: 8,
+    bass: [43,0,0,43, 0,0,0,0, 38,0,0,38, 0,0,0,0,  40,0,0,40, 0,0,0,0, 36,0,0,36, 0,0,0,0],
+    lead: [67,0,71,0, 74,71,67,0, 69,0,74,0, 71,69,67,0,  67,0,71,0, 74,76,79,0, 77,74,71,0, 74,0,67,0],
+    pad:  [59,0,0,0,0,0,0,0, 57,0,0,0,0,0,0,0, 59,0,0,0,0,0,0,0, 55,0,0,0,0,0,0,0],
+    drum: [1,0,0,0,1,0,0,0, 1,0,0,0,1,0,0,0, 1,0,0,0,1,0,0,0, 1,0,0,0,1,0,0,1],
+    hat:  [0,0,1,0,0,0,1,0, 0,0,1,0,0,0,1,0, 0,0,1,0,0,0,1,0, 0,0,1,0,0,0,1,0],
+    bassType: 'triangle', leadType: 'triangle', padType: 'triangle', padGain: 0.06, drumLP: 1400, hatGain: 0.07,
   },
 };
 
@@ -676,26 +772,34 @@ function scheduleAhead() {
   if (!MUSIC.themeName || !AUDIO.ctx) return;
   const t = THEMES[MUSIC.themeName];
   if (!t) return;
+  const len = t.bass.length;        // pattern length — 16 (one bar) or 32 (two)
   const stepDur = 60 / t.bpm / 4;   // sixteenth-note length
   while (MUSIC.nextTime < AUDIO.ctx.currentTime + 0.25) {
-    musicStep(t, MUSIC.step % 16, MUSIC.nextTime);
+    musicStep(t, MUSIC.step % len, MUSIC.nextTime, stepDur);
     MUSIC.nextTime += stepDur;
     MUSIC.step++;
   }
 }
 
-function musicStep(theme, step, when) {
+function musicStep(theme, step, when, stepDur) {
   const dest = MUSIC.themeGain;
   if (!dest) return;
-  const ctx = AUDIO.ctx;
   // Bass
   const bn = theme.bass[step];
   if (bn) musicSynth(midiHz(bn), when, 0.32, theme.bassType, 0.35, dest);
   // Lead
   const ln = theme.lead[step];
   if (ln) musicSynth(midiHz(ln), when, 0.18, theme.leadType, 0.18, dest);
+  // Pad (sustained chord) — the layer that keeps sparse themes from sounding empty
+  if (theme.pad) {
+    const pn = theme.pad[step];
+    if (pn) musicPad(midiHz(pn), when, (theme.padHold || 8) * stepDur,
+                     theme.padType || 'triangle', theme.padGain || 0.07, dest);
+  }
   // Drum (kick)
   if (theme.drum[step]) musicDrum(when, theme.drumLP || 1200, 0.10, dest);
+  // Hi-hat tick
+  if (theme.hat && theme.hat[step]) musicHat(when, theme.hatGain || 0.08, dest);
 }
 
 function musicSynth(freq, when, dur, type, peak, dest) {
@@ -726,6 +830,43 @@ function musicDrum(when, lpHz, dur, dest) {
   src.start(when); src.stop(when + dur + 0.05);
 }
 
+// Sustained chord pad — slow swell then release. Two slightly-detuned voices
+// share one gain for a warm, full bed under the melody.
+function musicPad(freq, when, dur, type, peak, dest) {
+  const ctx = AUDIO.ctx;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.linearRampToValueAtTime(peak, when + Math.min(0.12, dur * 0.3));
+  g.gain.setValueAtTime(peak, when + dur * 0.6);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  g.connect(dest);
+  for (const detune of [-5, 5]) {
+    const osc = ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, when);
+    osc.detune.setValueAtTime(detune, when);
+    osc.connect(g);
+    osc.start(when); osc.stop(when + dur + 0.05);
+  }
+}
+
+// Hi-hat tick — short high-passed noise burst for groove.
+function musicHat(when, peak, dest) {
+  const ctx = AUDIO.ctx;
+  const dur = 0.035;
+  const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const filt = ctx.createBiquadFilter(); filt.type = 'highpass'; filt.frequency.value = 7000;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(peak, when);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  src.connect(filt); filt.connect(g); g.connect(dest);
+  src.start(when); src.stop(when + dur + 0.02);
+}
+
 // Apply the mute flag to the audio master — silences SFX *and* music.
 let _savedMasterGain = null;
 function applyMute() {
@@ -743,15 +884,15 @@ function themeForLevel(level) {
   switch (level) {
     case 'dungeon':           return 'dungeon';
     case 'ocean-surface':
-    case 'ocean-underwater':
     case 'pirate-ship':       return 'nautical';
+    case 'ocean-underwater':  return 'abyss';
     case 'space-cockpit':
     case 'neptune-approach':
     case 'saturn-approach':
     case 'mars-approach':     return 'synthwave';
     case 'pluto-surface':
-    case 'mars-surface':
     case 'uranus-surface':    return 'cold';
+    case 'mars-surface':      return 'martian';
     case 'neptune-surface':
     case 'saturn-surface':
     case 'jupiter-surface':   return 'storm';
@@ -875,49 +1016,59 @@ const ENEMY_MARKER_POOL = [];
 function updateEnemyMarkers() {
   const container = document.getElementById('enemy-markers');
   if (!container) return;
-  // Hide all pooled markers first
-  for (const m of ENEMY_MARKER_POOL) m.style.display = 'none';
-  if (!STATE.started || STATE.gameover || !ENEMIES.length) return;
 
   const w = window.innerWidth, h = window.innerHeight;
   const margin = 36;
   let used = 0;
-  for (let i = 0; i < ENEMIES.length && used < 8; i++) {
-    const e = ENEMIES[i];
-    // Skip the red-circle target / the boss weak-point sphere — they're not threats per se
-    if (e.userData.isRedCircle) continue;
-    // World position with hit-offset, project to NDC
-    SCRATCH.vA.copy(e.position);
-    SCRATCH.vA.y += e.userData.hitOffsetY || 0.5;
-    const ndc = SCRATCH.vA.project(camera);
-    const behind = ndc.z > 1;
-    const onScreen = !behind && Math.abs(ndc.x) <= 1 && Math.abs(ndc.y) <= 1;
-    if (onScreen) continue;
-    // For behind-camera, flip both axes so the marker points "back"
-    let sx = ndc.x, sy = ndc.y;
-    if (behind) { sx = -sx; sy = -sy; }
-    // Clamp to unit-square edge
-    const ax = Math.abs(sx), ay = Math.abs(sy);
-    const k = Math.max(ax, ay, 0.001);
-    sx /= k; sy /= k;
-    // NDC → pixel
-    const px = (sx + 1) / 2 * (w - 2 * margin) + margin;
-    const py = (1 - (sy + 1) / 2) * (h - 2 * margin) + margin;
-    // Rotation: triangle's default points up (negative-y in CSS terms)
-    const ang = Math.atan2(sx, sy);    // CSS y-down so swap args
+  if (STATE.started && !STATE.gameover && ENEMIES.length) {
+    for (let i = 0; i < ENEMIES.length && used < 8; i++) {
+      const e = ENEMIES[i];
+      // Skip the red-circle target / the boss weak-point sphere — they're not threats per se
+      if (e.userData.isRedCircle) continue;
+      // World position with hit-offset, project to NDC
+      SCRATCH.vA.copy(e.position);
+      SCRATCH.vA.y += e.userData.hitOffsetY || 0.5;
+      const ndc = SCRATCH.vA.project(camera);
+      const behind = ndc.z > 1;
+      const onScreen = !behind && Math.abs(ndc.x) <= 1 && Math.abs(ndc.y) <= 1;
+      if (onScreen) continue;
+      // For behind-camera, flip both axes so the marker points "back"
+      let sx = ndc.x, sy = ndc.y;
+      if (behind) { sx = -sx; sy = -sy; }
+      // Clamp to unit-square edge
+      const ax = Math.abs(sx), ay = Math.abs(sy);
+      const k = Math.max(ax, ay, 0.001);
+      sx /= k; sy /= k;
+      // NDC → pixel — whole pixels / centiradians, so the dirty-check below
+      // skips DOM writes for sub-perceptual movement
+      const px = Math.round((sx + 1) / 2 * (w - 2 * margin) + margin);
+      const py = Math.round((1 - (sy + 1) / 2) * (h - 2 * margin) + margin);
+      // Rotation: triangle's default points up (negative-y in CSS terms)
+      const ang = Math.round(Math.atan2(sx, sy) * 100) / 100;    // CSS y-down so swap args
 
-    let marker = ENEMY_MARKER_POOL[used];
-    if (!marker) {
-      marker = document.createElement('div');
-      marker.className = 'enemy-marker';
-      container.appendChild(marker);
-      ENEMY_MARKER_POOL.push(marker);
+      let marker = ENEMY_MARKER_POOL[used];
+      if (!marker) {
+        marker = document.createElement('div');
+        marker.className = 'enemy-marker';
+        container.appendChild(marker);
+        ENEMY_MARKER_POOL.push(marker);
+      }
+      // Only touch the DOM when the marker actually moved — these three style
+      // writes used to run for every marker every frame
+      if (!marker._shown) { marker.style.display = 'block'; marker._shown = true; }
+      if (marker._px !== px || marker._py !== py || marker._ang !== ang) {
+        marker._px = px; marker._py = py; marker._ang = ang;
+        marker.style.left = px + 'px';
+        marker.style.top  = py + 'px';
+        marker.style.transform = `translate(-50%, -50%) rotate(${ang}rad)`;
+      }
+      used++;
     }
-    marker.style.display = 'block';
-    marker.style.left = px + 'px';
-    marker.style.top  = py + 'px';
-    marker.style.transform = `translate(-50%, -50%) rotate(${ang}rad)`;
-    used++;
+  }
+  // Hide whatever the pool no longer needs
+  for (let i = used; i < ENEMY_MARKER_POOL.length; i++) {
+    const m = ENEMY_MARKER_POOL[i];
+    if (m._shown) { m.style.display = 'none'; m._shown = false; }
   }
 }
 
@@ -984,7 +1135,7 @@ function init() {
   spawnTreatPickups(diff().treatBase);
   buildDogViewModel();
   addLighting();
-  drawDogFace(STATE.health);
+  updateDogFace();
 
   window.addEventListener('resize', onResize);
   window.addEventListener('keydown', e => {
@@ -1028,6 +1179,16 @@ function init() {
     }
   });
   window.addEventListener('keyup',   e => { KEYS[e.code] = false; });
+  // Tab-away safety: keyup never arrives for keys held across a focus loss, so
+  // the dog would keep running by itself on return. Drop all held input and pause.
+  const onFocusLost = () => {
+    for (const k in KEYS) KEYS[k] = false;
+    MOUSE.dx = 0; MOUSE.dy = 0;
+    TOUCH.moveX = 0; TOUCH.moveZ = 0; TOUCH.lookX = 0; TOUCH.lookY = 0;
+    pauseGame();   // self-guards against not-started / gameover / transitioning
+  };
+  window.addEventListener('blur', onFocusLost);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) onFocusLost(); });
   document.addEventListener('mousemove', onMouseMove);
   document.addEventListener('click', onClick);
   document.addEventListener('pointerlockchange', () => {
@@ -3236,7 +3397,7 @@ function spawnExplosionFlash(pos) {
   scene.add(flash);
   // Sphere flash
   const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(0.6, 14, 10),
+    EXPLOSION_FLASH_GEO,
     new THREE.MeshBasicMaterial({ color: 0xffd060, transparent: true, opacity: 1 })
   );
   sphere.position.copy(pos);
@@ -3987,7 +4148,7 @@ function buildJupiterDigSpot() {
   g.userData.glow = glow;
   g.userData.core = core;
   // Place it near the center of the plain, somewhere visible
-  g.position.set(4, 0, -3);
+  g.position.set(4, terrainHeightAt(4, -3, 'jupiter-surface'), -3);
   scene.add(g);
   JUPITER_DIG.mesh = g;
   JUPITER_DIG.active = true;
@@ -4223,7 +4384,7 @@ function spawnGroundSpikePacks(count) {
       px = (Math.random() - 0.5) * 42;
       pz = (Math.random() - 0.5) * 42;
     } while (px*px + pz*pz < 8);
-    g.position.set(px, 0, pz);
+    g.position.set(px, terrainHeightAt(px, pz), pz);
     g.userData.rotOffset = Math.random() * Math.PI * 2;
     scene.add(g);
     SPIKE_PICKUPS.push(g);
@@ -4441,10 +4602,10 @@ function updateTennisBall(e, dt, t) {
   e.position.x += moveDir.x * e.userData.speed * dt;
   e.position.z += moveDir.z * e.userData.speed * dt;
 
-  // Bouncing: gravity-like vertical motion with ground bounce
+  // Bouncing: gravity-like vertical motion with ground bounce off the terrain
   e.userData.bounceVy -= 18 * dt;
   e.position.y += e.userData.bounceVy * dt;
-  const restY = e.userData.hitRadius || 0.95;
+  const restY = (e.userData.hitRadius || 0.95) + terrainHeightAt(e.position.x, e.position.z);
   if (e.position.y < restY) {
     e.position.y = restY;
     // Bounce with energy loss; occasionally hop on its own
@@ -4690,7 +4851,7 @@ function buildMarsSurface() {
       rx = (Math.random() - 0.5) * 50;
       rz = (Math.random() - 0.5) * 50;
     } while (rx*rx + rz*rz < 18);
-    rock.position.set(rx, r * 0.35, rz);
+    rock.position.set(rx, terrainHeightAt(rx, rz, 'mars-surface') + r * 0.35, rz);
     rock.rotation.set(Math.random(), Math.random(), Math.random());
     rock.castShadow = true;
     rock.receiveShadow = true;
@@ -4703,7 +4864,8 @@ function buildMarsSurface() {
     const cr = 1.5 + Math.random() * 2.0;
     const crater = new THREE.Mesh(new THREE.RingGeometry(cr * 0.85, cr, 32), craterMat);
     crater.rotation.x = -Math.PI / 2;
-    crater.position.set((Math.random() - 0.5) * 40, 0.04, (Math.random() - 0.5) * 40);
+    const cx = (Math.random() - 0.5) * 40, cz = (Math.random() - 0.5) * 40;
+    crater.position.set(cx, terrainHeightAt(cx, cz, 'mars-surface') + 0.04, cz);
     scene.add(crater);
   }
 
@@ -5496,7 +5658,7 @@ function rocketInteract() {
   best.dog.rotation.y = 0;
   showMessage(`🐕 FREED ${ROCKET_INT.freed}/${ROCKET_INT.cages.length}!`, 1400);
   if (ROCKET_INT.freed >= ROCKET_INT.cages.length) {
-    setTimeout(() => { if (!transitioning && !STATE.gameover) triggerEarthLanding(); }, 1500);
+    gameTimeout(() => { if (!transitioning && !STATE.gameover) triggerEarthLanding(); }, 1500);
   }
 }
 
@@ -6586,10 +6748,7 @@ function throwLaser() {
 }
 
 function spawnEnemyLaser(fromPos, dir, damage = 12) {
-  const beam = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.06, 0.06, 0.8, 8),
-    new THREE.MeshBasicMaterial({ color: 0xff4060, transparent: true, opacity: 0.95 })
-  );
+  const beam = new THREE.Mesh(ENEMY_LASER_GEO, ENEMY_LASER_MAT);
   beam.rotation.x = Math.PI / 2;
   beam.position.copy(fromPos);
   beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
@@ -7553,7 +7712,7 @@ function updatePlayer(dt) {
   camera.rotation.x = playerPitch;
 
   // Movement direction from WASD + touch left-stick (both supported)
-  const move = new THREE.Vector3();
+  const move = PLAYER_MOVE.set(0, 0, 0);
   if (KEYS['KeyW'] || KEYS['ArrowUp'])    move.z -= 1;
   if (KEYS['KeyS'] || KEYS['ArrowDown'])  move.z += 1;
   if (KEYS['KeyA'] || KEYS['ArrowLeft'])  move.x -= 1;
@@ -7563,19 +7722,21 @@ function updatePlayer(dt) {
     move.z += tmz;
   }
   if (move.lengthSq() > 1) move.normalize();
-  move.applyEuler(new THREE.Euler(0, playerYaw, 0));
+  move.applyEuler(YAW_EULER.set(0, playerYaw, 0));
   move.multiplyScalar(speed * dt);
 
-  // Gravity (simple)
+  // Gravity (simple) — the floor follows the displaced terrain on hilly levels
+  // (and can dip below PLAYER_HEIGHT in their valleys)
   playerVelocityY += GRAVITY * dt;
   camera.position.y += playerVelocityY * dt;
-  if (camera.position.y < PLAYER_HEIGHT) {
-    camera.position.y = PLAYER_HEIGHT;
+  const groundY = PLAYER_HEIGHT + terrainHeightAt(camera.position.x, camera.position.z);
+  if (camera.position.y < groundY) {
+    camera.position.y = groundY;
     playerVelocityY = 0;
   }
 
   // Apply XZ movement with wall collision (simple AABB)
-  const next = camera.position.clone().add(move);
+  const next = PLAYER_NEXT.copy(camera.position).add(move);
   const [WX, WZ] = levelBounds(STATE.level);
   next.x = Math.max(-WX, Math.min(WX, next.x));
   next.z = Math.max(-WZ, Math.min(WZ, next.z));
@@ -7644,6 +7805,11 @@ function updatePlayer(dt) {
     // Slow gentle bob — player is "swimming" but still walks on seafloor
     camera.position.y = PLAYER_HEIGHT + Math.sin(clock.getElapsedTime() * 1.2) * 0.08;
     playerVelocityY = 0;
+  } else if (STATE.level === 'jupiter-surface' || STATE.level === 'mars-surface') {
+    // Climb hills in the same frame as the XZ move — gravity's clamp above ran
+    // before the move, so without this you'd clip into an upslope for a frame
+    const floorY = PLAYER_HEIGHT + terrainHeightAt(camera.position.x, camera.position.z);
+    if (camera.position.y < floorY) { camera.position.y = floorY; playerVelocityY = 0; }
   }
 
   // Arm bob
@@ -7931,30 +8097,45 @@ function flashHitVignette() {
   setTimeout(() => { el.style.opacity = '0'; }, 180);
 }
 
-// Floating damage number that drifts up from the boss
+// Floating damage number that drifts up from the boss. Divs are pooled —
+// combat spawns several per second and per-hit createElement/remove churned
+// the DOM. Static styles live in the .damage-number CSS class.
+const DMG_NUM_POOL = [];
+const DMG_NUM_VEC = new THREE.Vector3();
 function spawnDamageNumber(worldPos, amount, color = '#80ff80') {
-  const el = document.createElement('div');
+  let el = DMG_NUM_POOL.pop();
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'damage-number';
+    document.body.appendChild(el);
+  }
   el.textContent = amount > 0 ? `-${amount}` : 'DEFLECT';
-  el.style.cssText = `position:fixed; color:${color}; font-family:'Courier New',monospace; font-size:22px; font-weight:bold; text-shadow:0 0 8px ${color}, 0 0 2px #000; letter-spacing:2px; pointer-events:none; z-index:55; transition:transform 0.9s linear, opacity 0.9s linear; transform:translate(-50%, -50%);`;
+  el.style.color = color;
+  el.style.textShadow = `0 0 8px ${color}, 0 0 2px #000`;
   // Project world → screen
-  const v = worldPos.clone().project(camera);
+  const v = DMG_NUM_VEC.copy(worldPos).project(camera);
   const sx = (v.x * 0.5 + 0.5) * window.innerWidth;
   const sy = (-v.y * 0.5 + 0.5) * window.innerHeight;
   el.style.left = sx + 'px';
   el.style.top  = sy + 'px';
-  document.body.appendChild(el);
-  // Animate up + fade
-  requestAnimationFrame(() => {
-    el.style.transform = 'translate(-50%, -180%)';
-    el.style.opacity = '0';
-  });
-  setTimeout(() => el.remove(), 950);
+  // Reset to the start pose without animating, flush, then animate up + fade
+  el.style.transition = 'none';
+  el.style.transform = 'translate(-50%, -50%)';
+  el.style.opacity = '1';
+  el.style.display = 'block';
+  void el.offsetWidth;
+  el.style.transition = 'transform 0.9s linear, opacity 0.9s linear';
+  el.style.transform = 'translate(-50%, -180%)';
+  el.style.opacity = '0';
+  setTimeout(() => { el.style.display = 'none'; DMG_NUM_POOL.push(el); }, 950);
 }
 
 function spawnBossSparks(pos, color) {
+  // One material per burst — every spark in it fades in lockstep, so per-spark
+  // clones only multiplied the allocation count
   const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 });
   for (let i = 0; i < 8; i++) {
-    const p = new THREE.Mesh(new THREE.SphereGeometry(0.07, 5, 4), mat.clone());
+    const p = new THREE.Mesh(SPARK_GEO, mat);
     p.position.copy(pos).add(new THREE.Vector3(
       (Math.random() - 0.5) * 0.3,
       (Math.random() - 0.5) * 0.3,
@@ -8066,7 +8247,7 @@ function killEnemy(index) {
 function spawnDeathParticles(pos) {
   const particleMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
   for (let i = 0; i < 12; i++) {
-    const p = new THREE.Mesh(new THREE.SphereGeometry(0.06, 4, 3), particleMat);
+    const p = new THREE.Mesh(DEATH_PARTICLE_GEO, particleMat);
     p.position.copy(pos).add(new THREE.Vector3(
       (Math.random() - 0.5) * 0.5,
       Math.random() * 0.5,
@@ -8144,6 +8325,7 @@ function updateBonePickups(dt) {
     const dz = b.position.z - camera.position.z;
     if (Math.sqrt(dx*dx + dz*dz) < 0.9) {
       STATE.bones = Math.min(STATE.bones + 3, 40);
+      reactDogFace('yum');
       updateHUD();
       showMessage('+3 BONES!', 1000); playSound('pickup');
       scene.remove(b);
@@ -8342,6 +8524,7 @@ function updateTreatPickups(dt) {
       const heal = diff().treatHeal;
       const gained = Math.min(heal, 100 - STATE.health);
       STATE.health = Math.min(100, STATE.health + heal);
+      reactDogFace('yum');
       updateHUD();
       showMessage(gained > 0 ? `+${gained} HP! GOOD BOY!` : 'HEALTH FULL!', 1500); playSound('pickup');
       scene.remove(tr);
@@ -8399,8 +8582,9 @@ function spawnGroundMedkits(count) {
       px = (Math.random() - 0.5) * 38;
       pz = (Math.random() - 0.5) * 38;
     } while (px*px + pz*pz < 6);
-    group.position.set(px, 0.55, pz);
-    group.userData.bobBase = 0.55;
+    const gy = terrainHeightAt(px, pz);
+    group.position.set(px, gy + 0.55, pz);
+    group.userData.bobBase = gy + 0.55;
     group.userData.rotOffset = Math.random() * Math.PI * 2;
     scene.add(group);
     TREAT_PICKUPS.push(group);
@@ -8472,7 +8656,7 @@ function spawnGroundLaserPacks(count) {
       px = (Math.random() - 0.5) * 36;
       pz = (Math.random() - 0.5) * 36;
     } while (px*px + pz*pz < 9);
-    g.position.set(px, 0.9, pz);
+    g.position.set(px, terrainHeightAt(px, pz) + 0.9, pz);
     scene.add(g);
     SPACE_PICKUPS.push(g);
   }
@@ -8550,6 +8734,7 @@ function updateSpacePickups(dt) {
       if (p.userData.isHealthPack) {
         const gained = Math.min(p.userData.heal, 100 - STATE.health);
         STATE.health = Math.min(100, STATE.health + p.userData.heal);
+        reactDogFace('yum');
         updateHUD();
         showMessage(gained > 0 ? `+${gained} HP! GOOD BOY!` : 'HULL FULL!', 1400); playSound('pickup');
       } else if (p.userData.isLaserPack) {
@@ -8820,7 +9005,7 @@ function checkDoorTransition() {
     } else if (STATE.level === 'neptune-surface') {
       // Vacuums all destroyed — but a UFO descends to kidnap the dog!
       showMessage('VACUUMS DESTROYED! BUT WHAT IS THAT IN THE SKY..? 👽', 3500);
-      setTimeout(() => { if (!transitioning && !STATE.gameover) triggerKidnap(); }, 2500);
+      gameTimeout(() => { if (!transitioning && !STATE.gameover) triggerKidnap(); }, 2500);
     } else if (STATE.level === 'uranus-surface') {
       // Captors defeated — commandeer their rocket and escape toward Saturn
       buildPlutoRocketship();
@@ -9047,6 +9232,7 @@ function loadNextRoom() {
     if (STATE.level === 'jupiter-surface' && STATE.spikes === 0) STATE.spikes = 36;
 
     playerYaw = Math.PI;
+    playerPitch = 0;   // don't carry a look-down/up angle into the next level
     playerVelocityY = 0;
 
     buildLevel(STATE.level);
@@ -9095,8 +9281,8 @@ function updateEnemies(dt) {
       if (dist > 0.001) to.multiplyScalar(1 / dist);
       e.rotation.y = Math.atan2(to.x, to.z);
       if (dist > 1.8) e.position.addScaledVector(to, e.userData.speed * dt);
-      // Slight forward bob like rolling on uneven terrain
-      e.position.y = Math.sin(t * 4 + e.userData.bobOffset) * 0.04;
+      // Ride the terrain, with a slight bob like rolling on uneven ground
+      e.position.y = terrainHeightAt(e.position.x, e.position.z) + Math.sin(t * 4 + e.userData.bobOffset) * 0.04;
       // Pulse cat halo
       if (e.userData.catHalo) {
         e.userData.catHalo.intensity = 0.8 + Math.sin(t * 5 + e.userData.bobOffset) * 0.5;
@@ -9183,7 +9369,7 @@ function updateEnemies(dt) {
 
     if (e.userData.isWaterAlien) {
       // ── Water-gun alien: chase player, spray water blobs ──
-      const to = new THREE.Vector3().subVectors(camera.position, e.position);
+      const to = SCRATCH.vA.subVectors(camera.position, e.position);
       to.y = 0;
       const dist = to.length();
       to.normalize();
@@ -9193,7 +9379,7 @@ function updateEnemies(dt) {
       if (dist > 8) e.position.addScaledVector(to, e.userData.speed * dt);
       else if (dist < 3.5) e.position.addScaledVector(to, -e.userData.speed * 0.6 * dt);
       // Side strafe
-      const side = new THREE.Vector3(-to.z, 0, to.x);
+      const side = SCRATCH.vB.set(-to.z, 0, to.x);
       e.position.addScaledVector(side, Math.sin(t * 1.5 + e.userData.bobOffset) * dt * 0.9);
       // Slight bob
       e.position.y = Math.sin(t * 3 + e.userData.bobOffset) * 0.04;
@@ -9214,7 +9400,7 @@ function updateEnemies(dt) {
 
     if (e.userData.isFighter) {
       // ── Star-wars-style fighter behavior: arc past, fire lasers ──
-      const to = new THREE.Vector3().subVectors(camera.position, e.position);
+      const to = SCRATCH.vA.subVectors(camera.position, e.position);
       const dist = to.length();
       to.normalize();
 
@@ -9226,7 +9412,7 @@ function updateEnemies(dt) {
         // Peel off — fly past the cockpit
         e.position.addScaledVector(to, -e.userData.speed * 0.5 * dt);
         // Sideways arc
-        const side = new THREE.Vector3(-to.z, 0, to.x);
+        const side = SCRATCH.vB.set(-to.z, 0, to.x);
         e.position.addScaledVector(side, Math.sin(e.userData.approachT * 1.2 + e.userData.driftPhase) * dt * 3);
       }
       // Vertical wobble
@@ -9255,7 +9441,7 @@ function updateEnemies(dt) {
 
     if (e.userData.isGrayAlien) {
       // ── Gray alien: stays back, fires psychic blasts ──
-      const to = new THREE.Vector3().subVectors(camera.position, e.position);
+      const to = SCRATCH.vA.subVectors(camera.position, e.position);
       to.y = 0;
       const dist = to.length();
       to.normalize();
@@ -9265,7 +9451,7 @@ function updateEnemies(dt) {
       if (dist > 11) e.position.addScaledVector(to, e.userData.speed * dt);
       else if (dist < 6) e.position.addScaledVector(to, -e.userData.speed * 0.7 * dt);
       // Slow side strafe
-      const side = new THREE.Vector3(-to.z, 0, to.x);
+      const side = SCRATCH.vB.set(-to.z, 0, to.x);
       e.position.addScaledVector(side, Math.sin(t * 1.4 + e.userData.bobOffset) * dt * 0.8);
       // Body bob
       e.position.y = Math.sin(t * 2 + e.userData.bobOffset) * 0.04;
@@ -9285,7 +9471,7 @@ function updateEnemies(dt) {
 
     if (e.userData.isVacuum) {
       // ── Evil Vacuum behavior (rolls toward dog with growing dread) ──
-      const to = new THREE.Vector3().subVectors(camera.position, e.position);
+      const to = SCRATCH.vA.subVectors(camera.position, e.position);
       to.y = 0;
       const dist = to.length();
       to.normalize();
@@ -9316,7 +9502,7 @@ function updateEnemies(dt) {
 
     if (e.userData.isMartian) {
       // ── Martian behavior (ground, three writhing heads + tentacles) ──
-      const to = new THREE.Vector3().subVectors(camera.position, e.position);
+      const to = SCRATCH.vA.subVectors(camera.position, e.position);
       to.y = 0;
       const dist = to.length();
       to.normalize();
@@ -9367,7 +9553,7 @@ function updateEnemies(dt) {
 
     if (e.userData.isBoss) {
       // ── Boss behavior: drifts at distance, fires from each turret, spins slowly ──
-      const to = new THREE.Vector3().subVectors(camera.position, e.position);
+      const to = SCRATCH.vA.subVectors(camera.position, e.position);
       const dist = to.length();
       to.normalize();
 
@@ -9430,7 +9616,7 @@ function updateEnemies(dt) {
 
     if (e.userData.isAlienShip) {
       // ── Alien Ship behavior (full 3D, no gravity, fires lasers) ──
-      const to = new THREE.Vector3().subVectors(camera.position, e.position);
+      const to = SCRATCH.vA.subVectors(camera.position, e.position);
       const dist = to.length();
       to.normalize();
 
@@ -9440,7 +9626,7 @@ function updateEnemies(dt) {
         e.position.addScaledVector(to, e.userData.speed * dt);
       } else {
         // Sideways drift to feel evasive
-        const side = new THREE.Vector3(-to.z, 0, to.x);
+        const side = SCRATCH.vB.set(-to.z, 0, to.x);
         e.position.addScaledVector(side, Math.sin(t * 1.5 + e.userData.driftPhase) * e.userData.speed * 0.5 * dt);
       }
       // Gentle bob
@@ -9477,7 +9663,7 @@ function updateEnemies(dt) {
     }
 
     // Look at player
-    const toPlayer = new THREE.Vector3().subVectors(camera.position, e.position);
+    const toPlayer = SCRATCH.vA.subVectors(camera.position, e.position);
     toPlayer.y = 0;
     const dist = toPlayer.length();
     toPlayer.normalize();
@@ -9550,6 +9736,7 @@ function updateEnemies(dt) {
 
 function damagePlayer(amount, sourcePos) {
   STATE.health = Math.max(0, STATE.health - amount);
+  reactDogFace('ouch');
   updateHUD();
   playSound('hurt');
   // Screen flash red
@@ -9861,18 +10048,58 @@ function updateHUD() {
   const sp = document.getElementById('spikes-display');   if (sp) sp.style.display = isSpikeLevel ? 'block' : 'none';
   const prefix = document.getElementById('room-prefix');
   if (prefix) prefix.style.display = STATE.level === 'dungeon' ? 'inline' : 'none';
-  drawDogFace(STATE.health);
+  updateDogFace();
 }
 
-function drawDogFace(health) {
+// ── Dog HUD expression state ──────────────────────────────────────────────
+// The face shows graded emotion: a base expression tracks health across six
+// bands, and brief reactions override it — 'yum' when the dog eats, 'ouch' the
+// instant it's hit. updateDogFace() runs each frame and only repaints when the
+// resolved expression actually changes, so the canvas work stays near-zero.
+const FACE = { expr: null, reaction: null, reactionUntil: 0 };
+
+// Per-expression drawing recipe. eye/brow/mouth/tongue/extra/tint are switched on below.
+const FACE_CFG = {
+  yum:       { brow: 'happy',   eye: 'joy',    mouth: 'open',  tongue: 'big', extra: 'hearts',  tint: null },
+  happy:     { brow: 'happy',   eye: 'bright', mouth: 'open',  tongue: 'mid', extra: 'sparkle', tint: null },
+  content:   { brow: 'happy',   eye: 'open',   mouth: 'smile', tongue: 'tip', extra: null,      tint: null },
+  neutral:   { brow: 'flat',    eye: 'open',   mouth: 'smile', tongue: null,  extra: null,      tint: null },
+  worried:   { brow: 'worried', eye: 'open',   mouth: 'flat',  tongue: null,  extra: null,      tint: null },
+  sad:       { brow: 'sad',     eye: 'up',     mouth: 'frown', tongue: null,  extra: 'tear',    tint: 'pale' },
+  miserable: { brow: 'sad',     eye: 'half',   mouth: 'frown', tongue: null,  extra: 'tears',   tint: 'blood' },
+  ouch:      { brow: 'sad',     eye: 'shut',   mouth: 'shock', tongue: null,  extra: 'pain',    tint: 'red' },
+};
+
+// Fire a brief reaction overlay. 'yum' (eating) lingers a beat; 'ouch' is a quick flinch.
+function reactDogFace(kind) {
+  FACE.reaction = kind;
+  FACE.reactionUntil = clock.getElapsedTime() + (kind === 'yum' ? 1.0 : 0.5);
+}
+
+function resolveDogExpr() {
+  if (FACE.reaction && clock.getElapsedTime() < FACE.reactionUntil) return FACE.reaction;
+  const h = STATE.health;
+  if (h >= 90) return 'happy';
+  if (h >= 70) return 'content';
+  if (h >= 50) return 'neutral';
+  if (h >= 30) return 'worried';
+  if (h >= 15) return 'sad';
+  return 'miserable';
+}
+
+// Called every frame; repaints only when the expression changes.
+function updateDogFace() {
+  const expr = resolveDogExpr();
+  if (expr !== FACE.expr) { FACE.expr = expr; drawDogFace(expr); }
+}
+
+function drawDogFace(expr) {
   const canvas = document.getElementById('dog-face');
   if (!canvas) return;
+  const cfg = FACE_CFG[expr] || FACE_CFG.neutral;
   const c = canvas.getContext('2d');
   const W = 80, H = 80;
   c.clearRect(0, 0, W, H);
-
-  const hurt    = health < 30;
-  const worried = health < 60;
 
   const FUR      = '#c07840';   // main coat
   const FUR_DARK = '#8a4e20';   // ears / shadow
@@ -9880,125 +10107,188 @@ function drawDogFace(health) {
   const MUZZLE   = '#e8d090';   // pale muzzle
   const JOWL     = '#d4a060';   // jowl cheeks
 
-  // ── Floppy ears — wide, hang down past chin ──
+  const droopy = cfg.eye === 'half' || cfg.eye === 'up';   // sadder = ears hang lower
+
+  // ── Floppy ears — wide, hang down past chin (droop further when sad) ──
+  const earDrop = droopy ? 4 : 0;
   c.fillStyle = FUR_DARK;
-  // Left ear: wide rounded flap hanging down left side
   c.beginPath();
   c.moveTo(14, 18);
-  c.bezierCurveTo(2, 16,  2, 38,  8, 58);
-  c.bezierCurveTo(12, 66, 20, 64, 22, 54);
+  c.bezierCurveTo(2, 16,  2, 38,  8, 58 + earDrop);
+  c.bezierCurveTo(12, 66 + earDrop, 20, 64 + earDrop, 22, 54);
   c.bezierCurveTo(18, 40, 14, 28, 16, 18);
   c.closePath(); c.fill();
-
-  // Right ear
   c.beginPath();
   c.moveTo(66, 18);
-  c.bezierCurveTo(78, 16, 78, 38, 72, 58);
-  c.bezierCurveTo(68, 66, 60, 64, 58, 54);
+  c.bezierCurveTo(78, 16, 78, 38, 72, 58 + earDrop);
+  c.bezierCurveTo(68, 66 + earDrop, 60, 64 + earDrop, 58, 54);
   c.bezierCurveTo(62, 40, 66, 28, 64, 18);
   c.closePath(); c.fill();
 
   // Inner ear highlight
   c.fillStyle = '#b06838';
-  c.beginPath(); c.ellipse(12, 40, 4, 14, -0.15, 0, Math.PI*2); c.fill();
-  c.beginPath(); c.ellipse(68, 40, 4, 14,  0.15, 0, Math.PI*2); c.fill();
+  c.beginPath(); c.ellipse(12, 40 + earDrop, 4, 14, -0.15, 0, Math.PI*2); c.fill();
+  c.beginPath(); c.ellipse(68, 40 + earDrop, 4, 14,  0.15, 0, Math.PI*2); c.fill();
 
-  // ── Head — rounder top, wider middle ──
+  // ── Head ──
   c.fillStyle = FUR;
-  c.beginPath();
-  c.ellipse(40, 34, 24, 22, 0, 0, Math.PI * 2);
-  c.fill();
-
-  // ── Forehead lighter stripe ──
+  c.beginPath(); c.ellipse(40, 34, 24, 22, 0, 0, Math.PI * 2); c.fill();
+  // Forehead lighter stripe
   c.fillStyle = FUR_LITE;
   c.beginPath(); c.ellipse(40, 24, 11, 9, 0, 0, Math.PI * 2); c.fill();
-
-  // ── Jowl cheeks — puff out from under eyes ──
+  // Jowl cheeks
   c.fillStyle = JOWL;
   c.beginPath(); c.ellipse(26, 50, 10, 9, -0.2, 0, Math.PI*2); c.fill();
   c.beginPath(); c.ellipse(54, 50, 10, 9,  0.2, 0, Math.PI*2); c.fill();
-
-  // ── Muzzle — long, prominent snout ──
+  // Muzzle
   c.fillStyle = MUZZLE;
-  c.beginPath();
-  c.ellipse(40, 55, 14, 13, 0, 0, Math.PI * 2);
-  c.fill();
-
-  // ── Nose — wide, flat dog nose ──
+  c.beginPath(); c.ellipse(40, 55, 14, 13, 0, 0, Math.PI * 2); c.fill();
+  // Nose
   c.fillStyle = '#1a0808';
-  c.beginPath();
-  c.ellipse(40, 48, 8, 5.5, 0, 0, Math.PI * 2);
-  c.fill();
-  // Nostrils
+  c.beginPath(); c.ellipse(40, 48, 8, 5.5, 0, 0, Math.PI * 2); c.fill();
   c.fillStyle = '#0a0404';
   c.beginPath(); c.ellipse(36.5, 49, 2.2, 1.5, 0.3, 0, Math.PI*2); c.fill();
   c.beginPath(); c.ellipse(43.5, 49, 2.2, 1.5,-0.3, 0, Math.PI*2); c.fill();
-  // Nose shine
   c.fillStyle = 'rgba(255,255,255,0.45)';
   c.beginPath(); c.ellipse(37.5, 46.5, 2.5, 1.5, -0.3, 0, Math.PI*2); c.fill();
 
-  // ── Eyes — round, low on head (dog proportion) ──
-  const eyeY = hurt ? 34 : 32;
-  for (const [ex, tilt] of [[27, 0.18], [53, -0.18]]) {
-    // Brown iris
-    c.fillStyle = '#5c2e08';
-    c.beginPath(); c.ellipse(ex, eyeY, 7, 6.5, tilt, 0, Math.PI*2); c.fill();
-    // Dark pupil
-    c.fillStyle = '#0d0808';
-    c.beginPath(); c.ellipse(ex, eyeY + (hurt ? 1 : 0), 4.5, 4.5, 0, 0, Math.PI*2); c.fill();
-    // Catchlight
-    c.fillStyle = '#fff';
-    c.beginPath(); c.ellipse(ex+2.5, eyeY-2, 2, 1.8, -0.4, 0, Math.PI*2); c.fill();
-    // Lower lid (jowl line)
-    c.strokeStyle = FUR_DARK;
-    c.lineWidth = 1.2;
-    c.beginPath();
-    c.arc(ex, eyeY + 1, 6.5, 0.15, Math.PI - 0.15);
-    c.stroke();
+  // ── Eyes ──
+  const eyeY = (cfg.eye === 'up') ? 33 : 32;
+  for (const [ex, tilt, side] of [[27, 0.18, -1], [53, -0.18, 1]]) {
+    if (cfg.eye === 'joy') {
+      // Happy closed eyes — upward arcs (∩)
+      c.strokeStyle = '#3a1e08'; c.lineWidth = 2.4; c.lineCap = 'round';
+      c.beginPath(); c.arc(ex, eyeY + 3, 6, Math.PI + 0.5, -0.5); c.stroke();
+    } else if (cfg.eye === 'shut') {
+      // Squeezed-shut wince — caret pointing inward (>  <)
+      c.strokeStyle = '#3a1e08'; c.lineWidth = 2.4; c.lineCap = 'round';
+      c.beginPath();
+      c.moveTo(ex - side*5, eyeY - 4); c.lineTo(ex + side*4, eyeY); c.lineTo(ex - side*5, eyeY + 4);
+      c.stroke();
+    } else {
+      // Open eye (brightness/size/look-direction vary by state)
+      const big = cfg.eye === 'bright';
+      const iod = big ? 7.5 : 7;
+      c.fillStyle = '#5c2e08';
+      c.beginPath(); c.ellipse(ex, eyeY, iod, iod - 0.5, tilt, 0, Math.PI*2); c.fill();
+      // Half-lidded: cover the top of the eye with fur for a droopy look
+      if (cfg.eye === 'half') {
+        c.fillStyle = FUR;
+        c.beginPath(); c.rect(ex - 8, eyeY - 9, 16, 7); c.fill();
+      }
+      // Pupil — shifts up when 'up' (pleading puppy look)
+      const pupilDY = cfg.eye === 'up' ? -1.6 : 0;
+      c.fillStyle = '#0d0808';
+      c.beginPath(); c.ellipse(ex, eyeY + pupilDY, 4.5, 4.5, 0, 0, Math.PI*2); c.fill();
+      // Catchlight — larger and twinned when bright/happy
+      c.fillStyle = '#fff';
+      c.beginPath(); c.ellipse(ex+2.5, eyeY-2 + pupilDY, big ? 2.6 : 2, big ? 2.3 : 1.8, -0.4, 0, Math.PI*2); c.fill();
+      if (big) { c.beginPath(); c.ellipse(ex-1.5, eyeY+1, 1.1, 1.0, 0, 0, Math.PI*2); c.fill(); }
+      // Lower lid
+      c.strokeStyle = FUR_DARK; c.lineWidth = 1.2;
+      c.beginPath(); c.arc(ex, eyeY + 1, 6.5, 0.15, Math.PI - 0.15); c.stroke();
+    }
   }
 
   // ── Eyebrows / brow ridge ──
-  c.strokeStyle = FUR_DARK;
-  c.lineWidth = 2.2;
-  c.lineCap = 'round';
-  if (hurt) {
+  c.strokeStyle = FUR_DARK; c.lineWidth = 2.2; c.lineCap = 'round';
+  if (cfg.brow === 'sad') {
     c.beginPath(); c.moveTo(19, 24); c.quadraticCurveTo(27, 28, 33, 27); c.stroke();
     c.beginPath(); c.moveTo(61, 24); c.quadraticCurveTo(53, 28, 47, 27); c.stroke();
-  } else if (worried) {
+  } else if (cfg.brow === 'worried') {
     c.beginPath(); c.moveTo(19, 25); c.quadraticCurveTo(27, 27, 33, 26); c.stroke();
     c.beginPath(); c.moveTo(61, 25); c.quadraticCurveTo(53, 27, 47, 26); c.stroke();
-  } else {
+  } else if (cfg.brow === 'flat') {
+    c.beginPath(); c.moveTo(20, 25); c.quadraticCurveTo(26, 24, 33, 25); c.stroke();
+    c.beginPath(); c.moveTo(60, 25); c.quadraticCurveTo(54, 24, 47, 25); c.stroke();
+  } else {   // happy
     c.beginPath(); c.moveTo(19, 27); c.quadraticCurveTo(26, 23, 33, 25); c.stroke();
     c.beginPath(); c.moveTo(61, 27); c.quadraticCurveTo(54, 23, 47, 25); c.stroke();
   }
 
-  // ── Mouth line on muzzle ──
-  c.strokeStyle = '#9a6030';
-  c.lineWidth = 1.5;
-  // Philtrum (center line down from nose)
-  c.beginPath(); c.moveTo(40, 54); c.lineTo(40, 59); c.stroke();
-  if (hurt) {
-    // Sad mouth corners down
-    c.beginPath(); c.moveTo(31, 59); c.quadraticCurveTo(40, 57, 49, 59); c.stroke();
-    c.beginPath(); c.moveTo(31, 59); c.quadraticCurveTo(28, 63, 31, 65); c.stroke();
-    c.beginPath(); c.moveTo(49, 59); c.quadraticCurveTo(52, 63, 49, 65); c.stroke();
+  // ── Mouth ──
+  c.strokeStyle = '#9a6030'; c.lineWidth = 1.5;
+  c.beginPath(); c.moveTo(40, 54); c.lineTo(40, 59); c.stroke();   // philtrum
+  if (cfg.mouth === 'shock') {
+    // Open "O" of pain
+    c.fillStyle = '#7a1828';
+    c.beginPath(); c.ellipse(40, 62, 5, 6, 0, 0, Math.PI*2); c.fill();
+    c.strokeStyle = '#9a6030';
+    c.beginPath(); c.ellipse(40, 62, 5, 6, 0, 0, Math.PI*2); c.stroke();
+  } else if (cfg.mouth === 'frown') {
+    c.beginPath(); c.moveTo(31, 60); c.quadraticCurveTo(40, 56, 49, 60); c.stroke();
+    c.beginPath(); c.moveTo(31, 60); c.quadraticCurveTo(28, 64, 31, 66); c.stroke();
+    c.beginPath(); c.moveTo(49, 60); c.quadraticCurveTo(52, 64, 49, 66); c.stroke();
+  } else if (cfg.mouth === 'flat') {
+    c.beginPath(); c.moveTo(32, 60); c.quadraticCurveTo(40, 61, 48, 60); c.stroke();
   } else {
-    // Happy — mouth corners up
+    // smile / open — corners up
     c.beginPath(); c.moveTo(31, 60); c.quadraticCurveTo(40, 58, 49, 60); c.stroke();
     c.beginPath(); c.moveTo(31, 60); c.quadraticCurveTo(27, 64, 30, 66); c.stroke();
     c.beginPath(); c.moveTo(49, 60); c.quadraticCurveTo(53, 64, 50, 66); c.stroke();
-    // Tongue
-    c.fillStyle = '#ff5577';
-    c.beginPath(); c.ellipse(40, 67, 6, 7, 0, 0, Math.PI*2); c.fill();
-    c.fillStyle = '#dd3355';
-    c.fillRect(37.5, 67, 5, 1.2);
   }
 
-  // ── Damage blood tint ──
-  if (hurt) {
-    c.fillStyle = 'rgba(160,0,0,0.22)';
+  // ── Tongue ──
+  if (cfg.tongue === 'big') {
+    c.fillStyle = '#ff5577';
+    c.beginPath(); c.ellipse(40, 70, 7.5, 9, 0, 0, Math.PI*2); c.fill();
+    c.fillStyle = '#dd3355'; c.fillRect(39, 67, 2, 8);
+  } else if (cfg.tongue === 'mid') {
+    c.fillStyle = '#ff5577';
+    c.beginPath(); c.ellipse(40, 67, 6, 7, 0, 0, Math.PI*2); c.fill();
+    c.fillStyle = '#dd3355'; c.fillRect(37.5, 67, 5, 1.2);
+  } else if (cfg.tongue === 'tip') {
+    c.fillStyle = '#ff5577';
+    c.beginPath(); c.ellipse(40, 64, 3.5, 3, 0, 0, Math.PI*2); c.fill();
+  }
+
+  // ── Extras (hearts / sparkle / tears / pain) ──
+  if (cfg.extra === 'hearts') {
+    c.fillStyle = '#ff5b8a';
+    for (const [hx, hy, s] of [[14, 14, 1], [66, 16, 0.85]]) drawHeart(c, hx, hy, s);
+  } else if (cfg.extra === 'sparkle') {
+    drawSparkle(c, 62, 22, '#fff7c0');
+  } else if (cfg.extra === 'tear' || cfg.extra === 'tears') {
+    c.fillStyle = 'rgba(120,200,255,0.9)';
+    c.beginPath(); c.ellipse(24, 44, 2.2, 3.4, 0, 0, Math.PI*2); c.fill();
+    if (cfg.extra === 'tears') { c.beginPath(); c.ellipse(56, 44, 2.2, 3.4, 0, 0, Math.PI*2); c.fill(); }
+  } else if (cfg.extra === 'pain') {
+    // Impact lines at the temples + a sweat bead
+    c.strokeStyle = '#ffcf3a'; c.lineWidth = 2; c.lineCap = 'round';
+    for (const [sx, sy, dx, dy] of [[12,16,-5,-3],[12,22,-6,1],[68,16,5,-3],[68,22,6,1]]) {
+      c.beginPath(); c.moveTo(sx, sy); c.lineTo(sx+dx, sy+dy); c.stroke();
+    }
+    c.fillStyle = 'rgba(150,210,255,0.95)';
+    c.beginPath(); c.ellipse(58, 20, 2.4, 3.4, 0, 0, Math.PI*2); c.fill();
+  }
+
+  // ── Whole-face tint ──
+  if (cfg.tint === 'blood' || cfg.tint === 'red') {
+    c.fillStyle = cfg.tint === 'red' ? 'rgba(220,0,0,0.26)' : 'rgba(160,0,0,0.22)';
+    c.beginPath(); c.ellipse(40, 40, 32, 36, 0, 0, Math.PI*2); c.fill();
+  } else if (cfg.tint === 'pale') {
+    c.fillStyle = 'rgba(120,140,170,0.14)';
     c.beginPath(); c.ellipse(40, 40, 32, 36, 0, 0, Math.PI*2); c.fill();
   }
+}
+
+function drawHeart(c, x, y, s) {
+  c.beginPath();
+  c.moveTo(x, y + 3*s);
+  c.bezierCurveTo(x, y + 1*s, x - 3*s, y - 1*s, x - 3*s, y + 1*s);
+  c.bezierCurveTo(x - 3*s, y + 3*s, x, y + 4*s, x, y + 6*s);
+  c.bezierCurveTo(x, y + 4*s, x + 3*s, y + 3*s, x + 3*s, y + 1*s);
+  c.bezierCurveTo(x + 3*s, y - 1*s, x, y + 1*s, x, y + 3*s);
+  c.closePath(); c.fill();
+}
+
+function drawSparkle(c, x, y, color) {
+  c.fillStyle = color;
+  c.beginPath();
+  c.moveTo(x, y - 5); c.lineTo(x + 1.4, y - 1.4); c.lineTo(x + 5, y);
+  c.lineTo(x + 1.4, y + 1.4); c.lineTo(x, y + 5); c.lineTo(x - 1.4, y + 1.4);
+  c.lineTo(x - 5, y); c.lineTo(x - 1.4, y - 1.4);
+  c.closePath(); c.fill();
 }
 
 let messageTimeout = null;
@@ -10098,6 +10388,7 @@ function rebuildLevel(fromBeginning) {
   if (fromBeginning) STATE.freedDogColors = [];
   clearCatShipTimers();
   clearLevelObstacles();
+  PENDING_GAME_TIMERS.length = 0;
 
   scene.userData = {};
 
@@ -10138,6 +10429,9 @@ function buildLevel(level) {
     scene.fog = new THREE.FogExp2(0x0a0005, 0.07);
     renderer.setClearColor(0x050005);
     camera.position.set(0, PLAYER_HEIGHT, currentRoom === 1 ? 0 : 8);
+    // Face the room, not the wall 1.4m behind the spawn — loadNextRoom's
+    // default yaw of π would leave the player nose-to-stone in rooms 2-3
+    playerYaw = 0; playerPitch = 0;
     swapHeldToBone();
     buildRoom(currentRoom);
     const bonesCount  = currentRoom === 1 ? diff().boneBase  : diff().bonePerRoom  + currentRoom;
@@ -10149,6 +10443,7 @@ function buildLevel(level) {
     scene.fog = new THREE.FogExp2(0x88c0e6, 0.025);
     renderer.setClearColor(0x88c0e6);
     camera.position.set(0, PLAYER_HEIGHT, 14);
+    playerYaw = 0;   // face the pirate boat (z≈0..7.5), not the open water behind
     swapHeldToDiamond();
     buildOceanSurface();
     spawnDiamondPickups(8);
@@ -10157,6 +10452,7 @@ function buildLevel(level) {
     scene.fog = new THREE.FogExp2(0x0a3a5a, 0.05);
     renderer.setClearColor(0x0a3a5a);
     camera.position.set(0, PLAYER_HEIGHT, 18);
+    playerYaw = 0;   // face the seafloor playfield, not the nearby bound
     swapHeldToDiamond();
     buildUnderwater();
     spawnDiamondPickups(10);
@@ -10164,7 +10460,10 @@ function buildLevel(level) {
   } else if (level === 'pirate-ship') {
     scene.fog = new THREE.FogExp2(0x224a6a, 0.018);
     renderer.setClearColor(0x224a6a);
-    camera.position.set(0, PLAYER_HEIGHT + 1.4, 14);
+    // Main deck, beside the poop-deck steps — (0,14) put the player inside the
+    // ship's wheel staring at the stern; from here yaw 0 looks down the deck
+    camera.position.set(2.2, PLAYER_HEIGHT + 1.4, 11);
+    playerYaw = 0;
     swapHeldToDiamond();
     buildPirateShip();
     spawnDiamondPickups(6);   // diamond placement adapted inside the ship builder
@@ -10183,9 +10482,11 @@ function buildLevel(level) {
   } else if (level === 'pluto-surface') {
     scene.fog = new THREE.FogExp2(0x081020, 0.02);
     renderer.setClearColor(0x020414);
-    // Spawn at z=20 to clear the crack at (0,13) with half-length 5.5 (covers z 7.5..18.5)
-    camera.position.set(0, PLAYER_HEIGHT, 20);
-    playerYaw = Math.PI;
+    // Spawn at z=20 to clear the crack at (0,13) (covers z 7.5..18.5), shifted
+    // to x=5 so the forward path doesn't run straight into it now that the
+    // player faces the plain (-Z) instead of the boundary 2m behind it
+    camera.position.set(5, PLAYER_HEIGHT, 20);
+    playerYaw = 0;
     swapHeldToBlaster();
     setSpacesuitVisor(true);
     if (STATE.lasers < 40) STATE.lasers = 60;
@@ -10245,7 +10546,7 @@ function buildLevel(level) {
     scene.fog = new THREE.FogExp2(0x801008, 0.038);
     renderer.setClearColor(0x401008);
     camera.position.set(0, PLAYER_HEIGHT, 18);
-    playerYaw = Math.PI;
+    playerYaw = 0;   // face the pillar field, not the boundary behind the spawn
     swapHeldToNailgun();
     setSpacesuitVisor(true);
     if (STATE.nails < 15) STATE.nails = 30;
@@ -10256,7 +10557,7 @@ function buildLevel(level) {
     scene.fog = new THREE.FogExp2(0xc06030, 0.028);
     renderer.setClearColor(0x804020);
     camera.position.set(0, PLAYER_HEIGHT, 20);
-    playerYaw = Math.PI;
+    playerYaw = 0;   // face the cloud deck where the balls and dig spot appear
     swapHeldToSpikeGun();
     setSpacesuitVisor(true);
     if (STATE.spikes < 18) STATE.spikes = 36;
@@ -10287,7 +10588,7 @@ function buildLevel(level) {
     scene.fog = new THREE.FogExp2(0x804030, 0.028);
     renderer.setClearColor(0x804030);
     camera.position.set(0, PLAYER_HEIGHT, 16);
-    playerYaw = Math.PI;
+    playerYaw = 0;   // face the boulder field, not the boundary behind the spawn
     swapHeldToBlaster();
     setSpacesuitVisor(true);
     if (STATE.lasers < 40) STATE.lasers = 70;
@@ -10583,6 +10884,7 @@ function loop() {
   updateEnemyMarkers();
   updateObjective();
   updateWaveCounter();
+  updateDogFace();   // lets transient 'yum'/'ouch' reactions decay back to the health face
   checkDoorTransition();
 
   renderer.render(scene, camera);

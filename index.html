@@ -180,6 +180,18 @@
       transform-origin: 50% 60%;
     }
 
+    /* Floating damage numbers — pooled divs, dynamic color/position set in JS */
+    .damage-number {
+      position: fixed;
+      display: none;
+      font-family: 'Courier New', monospace;
+      font-size: 22px;
+      font-weight: bold;
+      letter-spacing: 2px;
+      pointer-events: none;
+      z-index: 55;
+    }
+
     /* Damage-direction indicator: a radial gradient that fades from one screen edge */
     #damage-indicator {
       position: fixed;
@@ -316,7 +328,16 @@
     /* All touch-only styles are scoped to body.touch-mode (set in JS after a
        robust touch detection). Desktop never matches these even on
        touchscreen laptops or odd browser detection. */
-    body.touch-mode #health-bar-container { bottom: auto; top: 12px; left: 12px; }
+    /* Keep the top HUD row clear of notches / dynamic island */
+    body.touch-mode #touch-dev {
+      top: calc(12px + env(safe-area-inset-top, 0px));
+      right: calc(12px + env(safe-area-inset-right, 0px));
+    }
+    body.touch-mode #health-bar-container {
+      bottom: auto;
+      top: calc(12px + env(safe-area-inset-top, 0px));
+      left: calc(12px + env(safe-area-inset-left, 0px));
+    }
     body.touch-mode #bones-display,
     body.touch-mode #diamonds-display,
     body.touch-mode #lasers-display,
@@ -380,7 +401,7 @@
     <div id="objective-hint" style="position:absolute; top:38px; left:50%; transform:translateX(-50%); color:#fff0c8; font-family:'Courier New',monospace; font-size:13px; letter-spacing:2px; text-shadow:0 0 10px rgba(0,0,0,0.85); background:rgba(0,0,0,0.35); padding:4px 12px; border-radius:4px; display:none; pointer-events:none;"></div>
     <div id="wave-counter" style="position:absolute; top:14px; left:14px; color:#ff6b35; font-family:'Courier New',monospace; font-size:13px; letter-spacing:3px; text-shadow:0 0 8px #ff6b35; display:none;">WAVE 1/3</div>
     <div id="message"></div>
-    <button id="pause-btn" type="button" style="position:absolute; top:12px; right:60px; width:38px; height:38px; border-radius:8px; background:rgba(0,0,0,0.4); border:2px solid #c8a87a; color:#e8d5a3; font-family:'Courier New',monospace; font-size:16px; cursor:pointer; pointer-events:auto;">⏸</button>
+    <button id="pause-btn" type="button" style="position:absolute; top:calc(12px + env(safe-area-inset-top, 0px)); right:calc(60px + env(safe-area-inset-right, 0px)); width:38px; height:38px; border-radius:8px; background:rgba(0,0,0,0.4); border:2px solid #c8a87a; color:#e8d5a3; font-family:'Courier New',monospace; font-size:16px; cursor:pointer; pointer-events:auto;">⏸</button>
   </div>
 
   <!-- Hit vignette — bright green edge flash on boss weak-point hit -->
