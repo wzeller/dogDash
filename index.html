@@ -125,6 +125,28 @@
     #start-screen .controls span {
       color: #e8d5a3;
     }
+    #start-screen .controls {
+      max-width: min(680px, 88vw);
+    }
+    #start-screen .journey {
+      font-size: 13px;
+      color: #9a8a6a;
+      line-height: 1.85;
+      text-align: center;
+      max-width: min(640px, 88vw);
+      margin: 0 auto 40px;
+      padding: 0 20px;
+    }
+    #start-screen .journey span {
+      color: #ff9b5a;
+    }
+    /* Keep the title + intro inside narrow phone screens (game supports touch) */
+    @media (max-width: 560px) {
+      #start-screen h1 { font-size: 34px; letter-spacing: 3px; }
+      #start-screen .subtitle { font-size: 14px; margin-bottom: 26px; }
+      #start-screen .controls { font-size: 12px; line-height: 1.8; }
+      #start-screen .journey { font-size: 11.5px; line-height: 1.7; margin-bottom: 28px; }
+    }
     #start-btn {
       padding: 15px 50px;
       background: transparent;
@@ -492,10 +514,13 @@
     <div class="subtitle">ALIEN CAT INVASION</div>
     <div class="controls">
       <span>WASD / ARROWS</span> — Move &nbsp;&nbsp; <span>MOUSE</span> — Look<br>
-      <span>CLICK / SPACE</span> — Throw Bone &nbsp;&nbsp; <span>SHIFT</span> — Run<br>
-      <span>Walk over</span> 🦴 glowing bones (+3 ammo) to pick them up<br>
-      <span>Walk over</span> 🍖 orange treats (+35 HP) to heal<br>
-      <span>Clear 3 waves</span> to unlock the door &nbsp;•&nbsp; after 3 rooms: <span>OCEAN</span> with sharks, diamonds, and a pirate boat portal 🏴‍☠️
+      <span>CLICK / SPACE</span> — Throw &nbsp;&nbsp; <span>F</span> — Missile &nbsp;&nbsp; <span>SHIFT</span> — Run<br>
+      <span>Walk over</span> 🦴 ammo to reload &nbsp;•&nbsp; 🍖 treats (+HP) to heal<br>
+      <span>Clear 3 waves</span> to open each door
+    </div>
+    <div class="journey">
+      <span>THE JOURNEY:</span> a good dog vs. an alien-cat invasion. Escape the haunted dungeon 🏰 → cross the shark-infested ocean 🏴‍☠️ → rocket across the solar system 🚀 — Pluto, Neptune, Uranus, Saturn, Jupiter, Mars 🪐 — to free the kidnapped pack and bring every dog home to Earth 🌍<br>
+      <span>Every world</span> brings new foes and new things to throw — diamonds, lasers, dirt, nails, spikes &amp; missiles.
     </div>
     <div id="difficulty-row">
       <button class="diff-btn active" data-diff="normal" onclick="selectDifficulty('normal')">NORMAL</button>
