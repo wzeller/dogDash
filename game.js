@@ -4,6 +4,7 @@ import * as THREE from './vendor/three.module.js';
 const DIFFICULTY = {
   normal: {
     catHealth: 100,
+    damageMult: 1.0,     // scales all damage dealt TO the player
     treatHeal: 35,
     treatBase: 3,        // initial-room treat count
     treatPerRoom: 2,     // base added per new room (n + currentRoom)
@@ -16,6 +17,7 @@ const DIFFICULTY = {
   },
   easy: {
     catHealth: 50,       // 2-shot kills
+    damageMult: 0.6,     // hits hurt less too — HP-only scaling made easy feel harsh
     treatHeal: 60,
     treatBase: 6,
     treatPerRoom: 4,
@@ -554,7 +556,7 @@ let portalActive = false;
 let clock, scene, camera, renderer;
 let playerYaw = 0, playerPitch = 0;
 let playerVelocityY = 0;
-const playerState = { crackFalling: false };
+const playerState = { crackFalling: false, hurtCooldown: 0 };
 
 // ─── Procedural audio (Web Audio API) ────────────────────────────────────────
 // Lazy-initialized on first user gesture (browser policy). All sounds are
@@ -2433,8 +2435,8 @@ function spawnAlienBoss() {
 
   // Big HP + flags
   boss.position.set(0, 1, -28);
-  boss.userData.health = 480;
-  boss.userData.maxHealth = 480;
+  boss.userData.health = diff().catHealth * 4.8;   // 480 on normal, 240 on easy
+  boss.userData.maxHealth = boss.userData.health;
   boss.userData.speed = 0;          // stays at distance, doesn't ram
   boss.userData.attackTimer = 1.5;
   boss.userData.bobOffset = Math.random() * Math.PI * 2;
@@ -7237,6 +7239,9 @@ function swapHeldToBone() {
 
 // ─── Throw dispatch ──────────────────────────────────────────────────────────
 function throwAmmo() {
+  // During a transition/cinematic the main loop skips updateProjectiles, so a
+  // shot fired now would eat ammo and hang frozen in mid-air. Don't fire.
+  if (transitioning) return;
   // Per-weapon fire sound (the throw functions early-return if out of ammo, so
   // we only want to ding when something actually fires — let each helper
   // play its own sound)
@@ -7662,6 +7667,7 @@ function visorPlanetText(level) {
 
 // ─── Player Movement ──────────────────────────────────────────────────────────
 function updatePlayer(dt) {
+  playerState.hurtCooldown = Math.max(0, playerState.hurtCooldown - dt);
   // If any keyboard movement key is down, treat keyboard as authoritative and
   // zero out any stale touch input (e.g. a touchscreen laptop that registered a
   // ghost touch). Prevents "drifting by itself" complaints on hybrid devices.
@@ -7769,21 +7775,28 @@ function updatePlayer(dt) {
     playerVelocityY = 0;
   } else if (STATE.level === 'pluto-surface') {
     // Crack-fall hazard
-    const crack = isInCrack(camera.position.x, camera.position.z);
+    let crack = isInCrack(camera.position.x, camera.position.z);
     if (crack && !playerState.crackFalling) {
       playerState.crackFalling = true;
       damagePlayer(45);
       showMessage('💀 FELL INTO A CRACK! 💀', 1800);
-      // Knock player back along the shortest axis out of the crack
-      const cosA = Math.cos(-crack.angle), sinA = Math.sin(-crack.angle);
-      const lx = (camera.position.x - crack.x) * cosA - (camera.position.z - crack.z) * sinA;
-      const lz = (camera.position.x - crack.x) * sinA + (camera.position.z - crack.z) * cosA;
-      // Push out along whichever local axis they're closer to the edge of
-      const pushLx = Math.sign(lx || 1) * (crack.halfW + 0.6);
-      const pushLz = Math.sign(lz || 1) * (crack.halfL * 0.6);
-      const cosB = Math.cos(crack.angle), sinB = Math.sin(crack.angle);
-      camera.position.x = crack.x + (pushLx * cosB - pushLz * sinB);
-      camera.position.z = crack.z + (pushLx * sinB + pushLz * cosB);
+      // Knock player back along the shortest axis out of the crack. Cracks can
+      // cluster, so keep pushing until the landing spot is clear of ALL of
+      // them — otherwise the knockback itself can drop you straight into a
+      // neighbouring crack for a second (near-lethal) hit.
+      let guard = 0;
+      do {
+        const cosA = Math.cos(-crack.angle), sinA = Math.sin(-crack.angle);
+        const lx = (camera.position.x - crack.x) * cosA - (camera.position.z - crack.z) * sinA;
+        const lz = (camera.position.x - crack.x) * sinA + (camera.position.z - crack.z) * cosA;
+        // Push out along whichever local axis they're closer to the edge of
+        const pushLx = Math.sign(lx || 1) * (crack.halfW + 0.6);
+        const pushLz = Math.sign(lz || 1) * (crack.halfL * 0.6);
+        const cosB = Math.cos(crack.angle), sinB = Math.sin(crack.angle);
+        camera.position.x = crack.x + (pushLx * cosB - pushLz * sinB);
+        camera.position.z = crack.z + (pushLx * sinB + pushLz * cosB);
+        crack = isInCrack(camera.position.x, camera.position.z);
+      } while (crack && ++guard < 5);
       setTimeout(() => { playerState.crackFalling = false; }, 600);
     }
   } else if (STATE.level === 'ocean-surface') {
@@ -8180,13 +8193,14 @@ function updateEnemyProjectiles(dt) {
   for (let i = ENEMY_PROJECTILES.length - 1; i >= 0; i--) {
     const p = ENEMY_PROJECTILES[i];
     p.userData.lifetime -= dt;
+    // Swept test against the player: at low frame rates a 28 m/s laser moves
+    // further per frame than the hit radius, so a point-in-sphere check lets
+    // shots tunnel straight through the player on slow devices.
+    const prev = SCRATCH.vA.copy(p.position);
     p.position.addScaledVector(p.userData.velocity, dt);
 
     // Hit player? (camera position is player position)
-    const dx = p.position.x - camera.position.x;
-    const dy = p.position.y - camera.position.y;
-    const dz = p.position.z - camera.position.z;
-    if (dx*dx + dy*dy + dz*dz < 0.7 * 0.7) {
+    if (segmentSphereHit(prev, p.position, camera.position, 0.7) !== null) {
       damagePlayer(p.userData.damage, p.position);
       scene.remove(p);
       ENEMY_PROJECTILES.splice(i, 1);
@@ -9223,13 +9237,14 @@ function loadNextRoom() {
     scene.userData = {};
     portalActive = false;
 
-    // Ammo handoff between worlds
-    if (isOceanLike(STATE.level) && STATE.diamonds === 0) STATE.diamonds = 12;
-    if (STATE.level === 'dungeon' && STATE.bones === 0) STATE.bones = 30;
-    if (isSpaceLike(STATE.level) && STATE.lasers === 0) STATE.lasers = 24;
-    if (STATE.level === 'neptune-surface' && STATE.dirt === 0) STATE.dirt = 18;
-    if (STATE.level === 'saturn-surface' && STATE.nails === 0) STATE.nails = 30;
-    if (STATE.level === 'jupiter-surface' && STATE.spikes === 0) STATE.spikes = 36;
+    // Ammo handoff between worlds — top UP to the floor, don't just rescue
+    // exactly-zero (arriving with 1 laser used to leave you with 1)
+    if (isOceanLike(STATE.level)) STATE.diamonds = Math.max(STATE.diamonds, 12);
+    if (STATE.level === 'dungeon') STATE.bones = Math.max(STATE.bones, 30);
+    if (isSpaceLike(STATE.level)) STATE.lasers = Math.max(STATE.lasers, 24);
+    if (STATE.level === 'neptune-surface') STATE.dirt = Math.max(STATE.dirt, 18);
+    if (STATE.level === 'saturn-surface') STATE.nails = Math.max(STATE.nails, 30);
+    if (STATE.level === 'jupiter-surface') STATE.spikes = Math.max(STATE.spikes, 36);
 
     playerYaw = Math.PI;
     playerPitch = 0;   // don't carry a look-down/up angle into the next level
@@ -9539,14 +9554,17 @@ function updateEnemies(dt) {
         damagePlayer(18, e.position);
       }
 
-      // Keep martians out of cracks too — push them out of the rectangle
+      // Keep martians out of cracks too — push them out of the rectangle.
+      // dt-scaled (a fixed per-frame step doubles at 120Hz) and along the
+      // crack's short axis: a radial push from the crack CENTER can shove a
+      // martian lengthwise down the crack instead of out the near edge.
       const crack = isInCrack(e.position.x, e.position.z);
       if (crack) {
-        const dx = e.position.x - crack.x;
-        const dz = e.position.z - crack.z;
-        const d = Math.sqrt(dx*dx + dz*dz) || 1;
-        e.position.x += (dx / d) * 0.4;
-        e.position.z += (dz / d) * 0.4;
+        const cosA = Math.cos(-crack.angle), sinA = Math.sin(-crack.angle);
+        const lx = (e.position.x - crack.x) * cosA - (e.position.z - crack.z) * sinA;
+        const push = Math.sign(lx || 1) * 12 * dt;
+        e.position.x += push * Math.cos(crack.angle);
+        e.position.z += push * Math.sin(crack.angle);
       }
       continue;
     }
@@ -9735,6 +9753,11 @@ function updateEnemies(dt) {
 }
 
 function damagePlayer(amount, sourcePos) {
+  // Brief mercy window so simultaneous hits (a volley of lasers, a slap + a
+  // shot on the same frame) can't stack into an unreadable insta-kill.
+  if (playerState.hurtCooldown > 0) return;
+  playerState.hurtCooldown = 0.45;
+  amount = Math.max(1, Math.round(amount * diff().damageMult));
   STATE.health = Math.max(0, STATE.health - amount);
   reactDogFace('ouch');
   updateHUD();
@@ -10302,6 +10325,9 @@ function showMessage(text, duration = 2000) {
 
 function gameOver() {
   STATE.gameover = true;
+  // Defensive: dying mid-cinematic must not leave this stuck true — pauseGame
+  // refuses to open while it's set (rebuildLevel also clears it on restart)
+  transitioning = false;
   playSound('death');
   stopMusic();
   try { document.exitPointerLock(); } catch (e) { /* no-op on touch */ }
@@ -10735,7 +10761,10 @@ function updateSpawner(dt) {
   waveTimer -= dt;
   if (waveTimer <= 0) {
     waveNumber++;
-    const count = Math.min(1 + Math.floor(waveNumber / 2), 4);
+    // Waves grow with the room, not just the wave number — otherwise every
+    // level from the dungeon to Mars peaks at the same 2-enemy wave.
+    // Dungeon: 1/2/2 · Pluto-era: 2/3/3 · Mars-era: 3/3/4.
+    const count = Math.min(1 + Math.floor((waveNumber + currentRoom / 4) / 2), 4);
     let enemyLabel = 'ALIEN CAT';
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
